@@ -1,0 +1,8 @@
+[project]
+name = "robotvision"
+version = "0.1.0"
+description = "Robot Vision ML@P 25-26"
+authors = [{name = "Manav Gagvani", email = "mgagvani@purdue.edu"}]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
