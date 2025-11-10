@@ -70,7 +70,7 @@ class WaymoE2E(IterableDataset):
             protobuf = self.file.read(byte_length) # type: ignore
             frame.ParseFromString(protobuf)
 
-            past = np.stack([frame.past_states.pos_x, frame.past_states.pos_y, frame.past_states.pos_x, frame.past_states.vel_x, frame.past_states.vel_y, frame.past_states.accel_x, frame.past_states.accel_y], axis=-1)
+            past = np.stack([frame.past_states.pos_x, frame.past_states.pos_y, frame.past_states.vel_x, frame.past_states.vel_y, frame.past_states.accel_x, frame.past_states.accel_y], axis=-1)
     
 
             future = np.stack([frame.future_states.pos_x, frame.future_states.pos_y], axis=-1)
@@ -91,7 +91,7 @@ dataset = WaymoE2E(BATCH_SIZE, data_dir = DATA_DIR, images=False)
 loader = DataLoader(
     dataset, 
     batch_size=BATCH_SIZE,
-    num_workers=32,
+    num_workers=16,
 )
 
 def main():
