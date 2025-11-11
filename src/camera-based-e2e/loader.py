@@ -9,11 +9,13 @@ import numpy as np
 from PIL import Image
 from io import BytesIO 
 import cv2 
+from typing import Optional
+import random
 
 devices = ['cuda:0', 'cuda:1']
 
 class WaymoE2E(IterableDataset): 
-    def __init__(self, batch_size, indexFile = 'index.pkl', data_dir='./dataset', images = True):
+    def __init__(self, batch_size, indexFile = 'index.pkl', data_dir='./dataset', images = True, n_items: Optional[int] = None):
         self.images = images
         self.data_dir = data_dir
         self.batch_size = batch_size
@@ -23,6 +25,14 @@ class WaymoE2E(IterableDataset):
 
         with open(indexFile, 'rb') as f:
             self.indexes = pickle.load(f)
+
+        # TODO: Handle train, test, and validation splits properly (will we need unique index files?)
+        # - Create a better solution for taking subsets of the data
+        # - Eventually, determine how to sample specific subsets of the data that we care about.
+        if n_items is not None:
+            # Limit to n_items. Shuffle so each subset is random
+            random.shuffle(self.indexes)
+            self.indexes = self.indexes[:n_items]
 
 
     def decode_img(self, img):
@@ -75,6 +85,9 @@ class WaymoE2E(IterableDataset):
 
             future = np.stack([frame.future_states.pos_x, frame.future_states.pos_y], axis=-1)
 
+            past = np.array(past, dtype=np.float32) # ensure consistent dtype
+            future = np.array(future, dtype=np.float32)
+
 
             yield {'PAST': past, 'FUTURE': future, 'IMAGES': [self.decode_img(images.image) for images in frame.frame.images], 'INTENT': frame.intent}
 
@@ -97,6 +110,7 @@ if __name__ == "__main__":
     def main():
         # start = time.time()
         for batch_of_frames in tqdm(loader):
+            print(batch_of_frames.keys(), [b.shape for b in batch_of_frames.values() if isinstance(b, torch.Tensor)])
             pass
         # print("Total Time:", time.time()-start)
     
