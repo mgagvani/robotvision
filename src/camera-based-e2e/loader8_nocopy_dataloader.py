@@ -78,27 +78,27 @@ class WaymoE2E(IterableDataset):
 
             yield {'PAST': past, 'FUTURE': future, 'IMAGES': [self.decode_img(images.image) for images in frame.frame.images], 'INTENT': frame.intent}
 
+if __name__ == "__main__":
 
-
-from torch.utils.data import DataLoader
-import time
-from tqdm import tqdm
-DATA_DIR = '/scratch/gilbreth/bnamikas/data/waymo_open_dataset_end_to_end_camera_v_1_0_0'
-# DATA_DIR = './data'
-# DATA_DIR = '/tmp/'
-BATCH_SIZE = 32
-dataset = WaymoE2E(BATCH_SIZE, data_dir = DATA_DIR, images=False)
-loader = DataLoader(
-    dataset, 
-    batch_size=BATCH_SIZE,
-    num_workers=16,
-)
-
-def main():
-    # start = time.time()
-    for batch_of_frames in tqdm(loader):
-        pass
-    # print("Total Time:", time.time()-start)
-
-import cProfile
-main()
+    from torch.utils.data import DataLoader
+    import time
+    from tqdm import tqdm
+    DATA_DIR = '/scratch/gilbreth/mgagvani/wod/waymo_open_dataset_end_to_end_camera_v_1_0_0/'
+    # DATA_DIR = './data'
+    # DATA_DIR = '/tmp/'
+    BATCH_SIZE = 32
+    dataset = WaymoE2E(BATCH_SIZE, data_dir = DATA_DIR, images=False)
+    loader = DataLoader(
+        dataset, 
+        batch_size=BATCH_SIZE,
+        num_workers=16,
+    )
+    
+    def main():
+        # start = time.time()
+        for batch_of_frames in tqdm(loader):
+            pass
+        # print("Total Time:", time.time()-start)
+    
+    import cProfile
+    main()
