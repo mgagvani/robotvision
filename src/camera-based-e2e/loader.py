@@ -31,7 +31,9 @@ class WaymoE2E(IterableDataset):
         # - Eventually, determine how to sample specific subsets of the data that we care about.
         if n_items is not None:
             # Limit to n_items. Shuffle so each subset is random
-            random.shuffle(self.indexes)
+            # However, don't shuffle if batchsize = 1 so we can do things in order
+            if batch_size != 1:
+                random.shuffle(self.indexes)
             self.indexes = self.indexes[:n_items]
 
 
