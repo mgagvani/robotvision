@@ -1,10 +1,11 @@
-import argparse 
-from datetime import datetime
 
+from enum import Enum
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger
 
+import argparse
+from datetime import datetime
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,7 +19,11 @@ class BaseModel(nn.Module):
         
         # This is literally just linear regression = y_hat = Wx + b
         self.nn = nn.Sequential(
-            nn.Linear(in_dim, out_dim)
+            nn.Linear(in_dim, 512),
+            nn.ReLU(inplace=True),
+            nn.Linear(512, 512),
+            nn.ReLU(inplace=True),
+            nn.Linear(512, out_dim)
         )
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -51,16 +56,20 @@ class LitModel(pl.LightningModule):
         return self.model(x)
     
     def _shared_step(self, batch: torch.Tensor, stage: str) -> torch.Tensor:
-        past, future, images, intent = batch.values() # TODO: parse this robustly
+        past, future, images, intents = batch.values() # TODO: parse this robustly
         
         # For now, `past` is our input (B, 16, 6) e.g. Batch x Time x (x, y, v_x, v_y, a_x, a_y)
         # and `future` is our output (B, 16, 2) e.g. Batch x Time x (x, y)
 
         B, T, F = past.shape
+        # print(intents)
+        intent = torch.nn.functional.one_hot(intents-1, num_classes=3)
         past = past.view(B, T * F)  # Flatten time and features
+        combined_input = torch.concat((past, intent), axis=-1)
+
         future = future.view(B, -1)  # Flatten time and features
 
-        pred_future = self.forward(past)  # (B, T*2)
+        pred_future = self.forward(combined_input)  # (B, T*2)
         loss = self.ade_loss(pred_future.view(B, -1, 2), future.view(B, -1, 2))
 
         # TODO: improve logging both to disk and to console
@@ -76,6 +85,12 @@ class LitModel(pl.LightningModule):
     def validation_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, "val")
     
+class DATASET_TYPE(Enum):
+    TRAIN = 1
+    TEST = 2
+    VAL = 3
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', type=str, required=True, help='Path to Waymo E2E data directory')
@@ -86,14 +101,14 @@ if __name__ == "__main__":
 
     # Data 
     # TODO - make this use a proper train / val split, and to sample only specific data that is long-tailed (e.g., difficult and out of distribution)
-    train_dataset = WaymoE2E(batch_size=args.batch_size, indexFile='index.pkl', data_dir=args.data_dir, images=False, n_items=1000)
-    test_dataset = WaymoE2E(batch_size=args.batch_size, indexFile='index.pkl', data_dir=args.data_dir, images=False, n_items=100)
+    train_dataset = WaymoE2E(batch_size=args.batch_size, dataset_type=DATASET_TYPE.TRAIN, data_dir=args.data_dir, images=False, n_items=100000)
+    test_dataset = WaymoE2E(batch_size=args.batch_size, dataset_type=DATASET_TYPE.VAL, data_dir=args.data_dir, images=False, n_items=10000)
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=8)
-    val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=8)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=12)
+    val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=4)
 
     # Model
-    in_dim = 16 * 6  # Past: (B, 16, 6)
+    in_dim = 16 * 6 + 3  # Past: (B, 16, 6)
     out_dim = 20 * 2  # Future: (B, 20, 2)
 
     base_model = BaseModel(in_dim=in_dim, out_dim=out_dim)
@@ -106,18 +121,14 @@ if __name__ == "__main__":
         logger=CSVLogger(base_path + "logs", name=f"camera_e2e_{datetime.now().strftime('%Y%m%d_%H%M')}"),
         callbacks=[
             ModelCheckpoint(monitor='val_loss',
-                             mode='min', 
-                             save_top_k=1, 
-                             dirpath=base_path + '/checkpoints',
-                             filename='camera-e2e-{epoch:02d}-{val_loss:.2f}'
-                            ),
+                mode='min', 
+                save_top_k=1, 
+                dirpath=base_path + '/checkpoints',
+                filename='camera-e2e-{epoch:02d}-{val_loss:.2f}'
+            ),
         ],
     )
 
     trainer.fit(lit_model, train_loader, val_loader)
 
     # Print summary of training progerss
-
-
-
-    

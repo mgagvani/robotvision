@@ -28,15 +28,20 @@ def gen_viz_data(model: BaseModel, data_root: str, num_samples: int):
 
     with torch.no_grad():
         for batch in tqdm(loader, desc="Generating trajectory data"):
-            past, future, images, intent = batch.values()
+            past, future, images, intents = batch.values()
             B, T, F = past.shape
 
+            intent = torch.nn.functional.one_hot(intents-1, num_classes=3)
             # Extract past positions (x, y) from the first 2 features
             past_positions = past[:, :, :2].squeeze(0).cpu()  # (T, 2)
             past_trajectories.append(past_positions)
 
+
             past_flat = past.view(B, T * F)
-            pred_future = model(past_flat)
+            intent = torch.nn.functional.one_hot(intents-1, num_classes=3)
+            combined_input = torch.concat((past_flat, intent), axis=-1)
+
+            pred_future = model(combined_input)
             pred_future = pred_future.view(B, -1, 2)
             pred_trajectories.append(pred_future.squeeze(0).cpu())
             gt_trajectories.append(future.squeeze(0).cpu())
@@ -284,7 +289,7 @@ if __name__ == "__main__":
 
     checkpoint = torch.load(args.model_path, map_location="cpu")
 
-    in_dim = 16 * 6  # Past: (B, 16, 6)
+    in_dim = 16 * 6 + 3  # Past: (B, 16, 6)
     out_dim = 20 * 2  # Future: (B, 20, 2)
     model = BaseModel(in_dim=in_dim, out_dim=out_dim)
 
@@ -292,12 +297,13 @@ if __name__ == "__main__":
         # Lightning checkpoint
         state_dict = {}
         for key, value in checkpoint["state_dict"].items():
-            # Remove 'model.' prefix if it's there
-            new_key = key.replace("model.", "") if key.startswith("model.") else key
-            state_dict[new_key] = value
-        model.load_state_dict(state_dict)
-    else:
-        model.load_state_dict(checkpoint)
+            # FILTER: Only take keys that belong to the model, ignoring 'example_input_array'
+            if key.startswith("model."):
+                new_key = key.replace("model.", "")
+                state_dict[new_key] = value
+        
+        # Now we can use strict=True because the dict is clean
+        model.load_state_dict(state_dict, strict=True)
 
     model.eval()
 
