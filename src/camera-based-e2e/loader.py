@@ -14,6 +14,8 @@ import random
 
 devices = ['cuda:0', 'cuda:1']
 
+random.seed(42) # Deterministic
+
 class WaymoE2E(IterableDataset): 
     def __init__(self, batch_size, indexFile = 'index.pkl', data_dir='./dataset', images = True, n_items: Optional[int] = None):
         self.images = images
@@ -24,17 +26,17 @@ class WaymoE2E(IterableDataset):
         self.file = None
 
         with open(indexFile, 'rb') as f:
+            # NOTE: test does not have reference trajectories
+            # We train on train and validate on val set
             self.indexes = pickle.load(f)
 
-        # TODO: Handle train, test, and validation splits properly (will we need unique index files?)
-        # - Create a better solution for taking subsets of the data
-        # - Eventually, determine how to sample specific subsets of the data that we care about.
-        if n_items is not None:
-            # Limit to n_items. Shuffle so each subset is random
-            # However, don't shuffle if batchsize = 1 so we can do things in order
-            if batch_size != 1:
-                random.shuffle(self.indexes)
-            self.indexes = self.indexes[:n_items]
+        # TODO: Determine how to sample specific subsets of the data that we care about.
+        if n_items is not None and n_items < len(self.indexes):
+            total = len(self.indexes)
+            # pick a random start such that a contiguous block of size n_items fits
+            start = random.randint(0, total - n_items)
+            self.indexes = self.indexes[start : start + n_items]
+
 
 
     def decode_img(self, img):
@@ -45,10 +47,10 @@ class WaymoE2E(IterableDataset):
         gpu_tensors_list = torchvision.io.decode_jpeg(
             img_tensor, 
             mode=torchvision.io.ImageReadMode.UNCHANGED,
-            device= 'cuda' #['cuda:0', 'cuda:1'][torch.utils.data.get_worker_info().id%2]
+            device= 'cpu' #['cuda:0', 'cuda:1'][torch.utils.data.get_worker_info().id%2]
         )
         # img_array = np.frombuffer(img, np.uint8)
-        return gpu_tensors_list.cpu()
+        return gpu_tensors_list
     
     def __len__(self):
         return len(self.indexes)
@@ -98,11 +100,10 @@ if __name__ == "__main__":
     from torch.utils.data import DataLoader
     import time
     from tqdm import tqdm
+    # NOTE: Replace with your path
     DATA_DIR = '/scratch/gilbreth/mgagvani/wod/waymo_open_dataset_end_to_end_camera_v_1_0_0/'
-    # DATA_DIR = './data'
-    # DATA_DIR = '/tmp/'
     BATCH_SIZE = 32
-    dataset = WaymoE2E(BATCH_SIZE, data_dir = DATA_DIR, images=False)
+    dataset = WaymoE2E(BATCH_SIZE, indexFile="index_train.pkl", data_dir = DATA_DIR, images=False)
     loader = DataLoader(
         dataset, 
         batch_size=BATCH_SIZE,
