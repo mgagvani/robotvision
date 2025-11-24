@@ -17,7 +17,7 @@ from loader import WaymoE2E
 
 # Replace with your model defined in models/ 
 from models.base_model import LitModel, collate_with_images
-from models.monocular import MonocularModel
+from models.monocular import MonocularModel, SAMFeatures
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -38,7 +38,7 @@ if __name__ == "__main__":
     in_dim = 16 * 6  # Past: (B, 16, 6)
     out_dim = 20 * 2  # Future: (B, 20, 2)
 
-    model = MonocularModel(in_dim=in_dim, out_dim=out_dim)
+    model = MonocularModel(in_dim=in_dim, out_dim=out_dim, feature_extractor=SAMFeatures())
     lit_model = LitModel(model=model, lr=args.lr)
 
     base_path = Path(args.data_dir).parent.as_posix()

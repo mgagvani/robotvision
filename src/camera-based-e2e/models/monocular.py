@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -20,24 +20,55 @@ class DINOFeatures(nn.Module):
             for param in self.dino_model.parameters():
                 param.requires_grad = False
 
+        self.dims = [384, 384, 384]  # feature dims for each layer
+        self.patch_size = 16  # patch size
+
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
         # x: (B, 3, H, W)
         # transforms: resize 256x256, center crop, normalize
         x_t = self.transforms(x.float()) # preprocess
         features = self.dino_model(x_t)
         return features # 3 x [B, 384, 16, 16]
+    
+class SAMFeatures(nn.Module):
+    def __init__(self, model_name: str = "samvit_base_patch16.sa1b", frozen: bool = True):
+        super(SAMFeatures, self).__init__()
+
+        self.sam_model = timm.create_model(model_name, pretrained=True, num_classes=0)
+        data_config = timm.data.resolve_data_config(model=self.sam_model)
+        self.transforms = timm.data.create_transform(**data_config, is_training=False)
+        if frozen:
+            for param in self.sam_model.parameters():
+                param.requires_grad = False
+
+        self.dims = [256]
+        self.patch_size = 64  # patch size
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, 3, H, W)
+        # transforms: resize 1024x1024, center crop, normalize
+        x_t = self.transforms(x.float()) # preprocess
+        features = self.sam_model.forward_features(x_t) # (B, 256, 64, 64)
+        return features
 
 class MonocularModel(nn.Module):
-    def __init__(self, in_dim: int, out_dim: int, dino_model_name: str = "vit_small_plus_patch16_dinov3.lvd1689m"):
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        dino_model_name: str = "vit_small_plus_patch16_dinov3.lvd1689m",
+        feature_extractor: Optional[nn.Module] = None,
+    ):
         # out_dim: (B, 40) which gets reshaped to (B, 20, 2) later
         super(MonocularModel, self).__init__()
-        self.dino = DINOFeatures(model_name=dino_model_name, frozen=True)
+        self.features = feature_extractor or DINOFeatures(model_name=dino_model_name, frozen=True)
 
         # vanilla attention 
-        self.query = nn.Parameter(torch.zeros(1, 1, 1152)) # (1, 1, 1152)
+        self.feature_dim = sum(self.features.dims)  # works for both DINO and SAM
+        self.query = nn.Parameter(torch.zeros(1, 1, self.feature_dim)) # (1, 1, dim)
         nn.init.normal_(self.query) # init to N(0, 1)
-        self.key_projection = nn.Linear(in_features=1152, out_features=1152) # project (1152,) into "key" space
-        self.value_projection = nn.Linear(in_features=1152, out_features=out_dim) # project (1152,) into output dimension
+        self.key_projection = nn.Linear(in_features=self.feature_dim, out_features=self.feature_dim) # project into "key" space
+        self.value_projection = nn.Linear(in_features=self.feature_dim, out_features=out_dim) # project into output dimension
 
 
     def forward(self, x: dict) -> torch.Tensor:
@@ -46,18 +77,20 @@ class MonocularModel(nn.Module):
         
         # Ref: https://github.com/waymo-research/waymo-open-dataset/blob/5f8a1cd42491210e7de629b6f8fc09b65e0cbe99/src/waymo_open_dataset/dataset.proto#L50%20%20order%20=%20[2,%201,%203]
         front_cam = images[1]
-        dino_features: List[torch.Tensor] = self.dino(front_cam)  # 3 x [B, 384, 16, 16]
+        feats = self.features(front_cam)  # list or tensor
 
-        # tokens
-        tokens = torch.cat([f.flatten(2) for f in dino_features], dim=1)  # (B, 384*3, 16*16) = (B, 1152, 256)
-        tokens = torch.permute(tokens, (0, 2, 1)) # (B, 256, 1152)
+        # tokens: handle list of features or single tensor
+        if isinstance(feats, (list, tuple)):
+            tokens = torch.cat([f.flatten(2) for f in feats], dim=1)  # (B, C_total, N)
+        else:
+            tokens = feats.flatten(2)  # (B, C, N)
+        tokens = torch.permute(tokens, (0, 2, 1)) # (B, N, C_total)
 
         # attention
         key = self.key_projection(tokens) # (B, 256, 1152)
         value = self.value_projection(tokens) # (B, 256, 40)
-        query = self.query.broadcast_to((tokens.shape[0], 1, 1152)) # (B, 1, 1152)
+        query = self.query.broadcast_to((tokens.shape[0], 1, self.feature_dim)) # (B, 1, 1152)
 
         scores = query @ key.permute((0, 2, 1)) # (B, 1, 256) single value per token
         attention = F.softmax(scores / sqrt(key.shape[2]), dim=2) @ value # (B, 1, 40)
         return attention.squeeze(1) # (B, 40)
-
