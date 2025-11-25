@@ -31,25 +31,33 @@ class DINOFeatures(nn.Module):
         return features # 3 x [B, 384, 16, 16]
     
 class SAMFeatures(nn.Module):
-    def __init__(self, model_name: str = "samvit_base_patch16.sa1b", frozen: bool = True):
+    def __init__(
+        self,
+        model_name: str = "timm/sam2_hiera_tiny.fb_r896_2pt1",
+        frozen: bool = True,
+        feature_stage: int = -1,
+    ):
         super(SAMFeatures, self).__init__()
 
-        self.sam_model = timm.create_model(model_name, pretrained=True, num_classes=0)
+        # features_only returns a list of stage outputs
+        self.sam_model = timm.create_model(model_name, pretrained=True, features_only=True)
         data_config = timm.data.resolve_data_config(model=self.sam_model)
         self.transforms = timm.data.create_transform(**data_config, is_training=False)
         if frozen:
             for param in self.sam_model.parameters():
                 param.requires_grad = False
 
-        self.dims = [256]
-        self.patch_size = 64  # patch size
+        channels = self.sam_model.feature_info.channels()
+        reductions = self.sam_model.feature_info.reduction()
+        self.feature_stage = feature_stage
+        self.dims = [channels[feature_stage]]
+        self.patch_size = reductions[feature_stage]  # effective stride
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
         # x: (B, 3, H, W)
-        # transforms: resize 1024x1024, center crop, normalize
-        x_t = self.transforms(x.float()) # preprocess
-        features = self.sam_model.forward_features(x_t) # (B, 256, 64, 64)
-        return features
+        x_t = self.transforms(x.float())  # preprocess
+        feats = self.sam_model(x_t)       # list of feature maps
+        return [feats[self.feature_stage]]
 
 class MonocularModel(nn.Module):
     def __init__(
