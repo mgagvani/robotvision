@@ -5,6 +5,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger
 
+<<<<<<< HEAD
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -139,8 +140,22 @@ if __name__ == "__main__":
 
     trainer.fit(lit_model, train_loader, val_loader)
 
-    # Print summary of training progerss
+    try:
+        base_path = Path(base_path)
+        run_dir = sorted((base_path / "logs").glob("camera_e2e_*"))[-1]  # newest run
+        metrics = pd.read_csv(run_dir / "version_0" / "metrics.csv")
+        train = metrics[metrics["train_loss"].notna()]
+        val = metrics[metrics["val_loss"].notna()]
 
+        plt.figure()
+        plt.plot(train["step"], train["train_loss"], label="train_loss")
+        plt.plot(val["step"], val["val_loss"], label="val_loss")
+        plt.xlabel("Step")
+        plt.ylabel("Loss")
+        plt.legend()
+        plt.tight_layout()
+        out = Path("./visualizations")
+        plt.savefig(out / "loss.png", dpi=200)
+    except Exception as e:
+        print(f"Could not save loss plot: {e}")
 
-
-    

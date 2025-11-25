@@ -14,6 +14,8 @@ import random
 
 devices = ['cuda:0', 'cuda:1']
 
+random.seed(42) # Deterministic
+
 class WaymoE2E(IterableDataset): 
     def __init__(self, batch_size, indexFile = 'index.pkl', data_dir='./dataset', images = True, n_items: Optional[int] = None):
         self.images = images
@@ -33,7 +35,6 @@ class WaymoE2E(IterableDataset):
             # Limit to n_items. Shuffle so each subset is random
             random.shuffle(self.indexes)
             self.indexes = self.indexes[:n_items]
-
 
     def decode_img(self, img):
         if not self.images:

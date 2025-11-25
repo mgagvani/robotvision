@@ -1,7 +1,13 @@
+# Project-specific
+**/visualizations/**
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
 *$py.class
+
+# env setup script
+setup.sh
 
 # C extensions
 *.so
