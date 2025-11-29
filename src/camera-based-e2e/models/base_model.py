@@ -26,7 +26,7 @@ class LitModel(pl.LightningModule):
         self.example_input_array = ({
             'PAST': torch.zeros((1, 16, 6)),  # PAST
             'IMAGES': [torch.zeros((1, 3, 1280, 1920)) for _ in range(6)],  # IMAGES
-            'INTENT': torch.zeros(1)  # INTENT
+            'INTENT': torch.tensor([1.0]),  # INTENT
         },)
 
     # ---- Metrics ----
