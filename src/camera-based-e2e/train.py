@@ -39,13 +39,14 @@ if __name__ == "__main__":
     out_dim = 20 * 2  # Future: (B, 20, 2)
 
     model = MonocularModel(in_dim=in_dim, out_dim=out_dim, feature_extractor=SAMFeatures())
-    lit_model = LitModel(model=model, lr=args.lr)
+    lit_model = LitModel(model=torch.compile(model, mode="max-autotune"), lr=args.lr)
 
     base_path = Path(args.data_dir).parent.as_posix()
     # We don't want to save logs or checkpoints in the home directory - it'll fill up fast
     trainer = pl.Trainer(
         max_epochs=args.max_epochs,
         logger=CSVLogger(base_path + "/logs", name=f"camera_e2e_{datetime.now().strftime('%Y%m%d_%H%M')}"),
+        precision="bf16-mixed",
         callbacks=[
             ModelCheckpoint(monitor='val_loss',
                              mode='min', 
