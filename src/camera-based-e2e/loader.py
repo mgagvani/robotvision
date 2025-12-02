@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import IterableDataset
-from protos import e2e_pb2
+from waymo_open_dataset.protos import end_to_end_driving_data_pb2 as e2e_pb2
 import torchvision
 import pickle
 import struct
@@ -92,8 +92,10 @@ class WaymoE2E(IterableDataset):
             past = np.array(past, dtype=np.float32) # ensure consistent dtype
             future = np.array(future, dtype=np.float32)
 
+            # For submission to waymo evaluation server
+            name = frame.frame.context.name
 
-            yield {'PAST': past, 'FUTURE': future, 'IMAGES': [self.decode_img(images.image) for images in frame.frame.images], 'INTENT': frame.intent}
+            yield {'PAST': past, 'FUTURE': future, 'IMAGES': [self.decode_img(images.image) for images in frame.frame.images], 'INTENT': frame.intent, 'NAME': name}
 
 if __name__ == "__main__":
 
@@ -113,7 +115,8 @@ if __name__ == "__main__":
     def main():
         # start = time.time()
         for batch_of_frames in tqdm(loader):
-            print(batch_of_frames.keys(), [b.shape for b in batch_of_frames.values() if isinstance(b, torch.Tensor)])
+            print(batch_of_frames["INTENT"])
+            # print(batch_of_frames.keys(), [b.shape for b in batch_of_frames.values() if isinstance(b, torch.Tensor)])
             pass
         # print("Total Time:", time.time()-start)
     

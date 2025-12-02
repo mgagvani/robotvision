@@ -75,6 +75,7 @@ def collate_with_images(batch):
     past = [torch.as_tensor(b["PAST"], dtype=torch.float32) for b in batch]
     future = [torch.as_tensor(b["FUTURE"], dtype=torch.float32) for b in batch]
     intent = torch.as_tensor([b["INTENT"] for b in batch])
+    names = [b["NAME"] for b in batch]
 
     cams = list(zip(*[b["IMAGES"] for b in batch]))  # per-camera tuples
     images = [torch.stack(cam_imgs, dim=0) for cam_imgs in cams]  # stay on CPU
@@ -84,5 +85,6 @@ def collate_with_images(batch):
         "FUTURE": torch.stack(future, dim=0),
         "INTENT": intent,
         "IMAGES": images,
+        "NAME": names,
     }
 
