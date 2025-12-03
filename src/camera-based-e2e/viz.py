@@ -7,19 +7,25 @@ from typing import List, Tuple, Optional
 from tqdm import tqdm
 
 from loader import WaymoE2E
-from train import BaseModel
+from models.monocular import MonocularModel, SAMFeatures
+from torch import nn
 
-
-def gen_viz_data(model: BaseModel, data_root: str, num_samples: int):
+def gen_viz_data(model: nn.Module, data_root: str, num_samples: int, device: torch.device):
     """Generate the gt and pred trajectories along with past states"""
     dataset = WaymoE2E(
         batch_size=1,
-        indexFile="index.pkl",
+        indexFile="index_val.pkl",
         data_dir=data_root,
-        images=False,
+        images=True,
         n_items=num_samples,
     )
-    loader = torch.utils.data.DataLoader(dataset, batch_size=1, num_workers=4)
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=1,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=False,
+    )
     model.eval()
 
     pred_trajectories = []
@@ -28,15 +34,18 @@ def gen_viz_data(model: BaseModel, data_root: str, num_samples: int):
 
     with torch.no_grad():
         for batch in tqdm(loader, desc="Generating trajectory data"):
-            past, future, images, intent = batch.values()
+            past, future, images, intent = batch['PAST'], batch['FUTURE'], batch['IMAGES'], batch['INTENT']
+            past = past.to(device, non_blocking=True)
+            future = future.to(device, non_blocking=True)
+            intent = intent.to(device, non_blocking=True)
+            images = [img.to(device, non_blocking=True) for img in images]
             B, T, F = past.shape
 
             # Extract past positions (x, y) from the first 2 features
             past_positions = past[:, :, :2].squeeze(0).cpu()  # (T, 2)
             past_trajectories.append(past_positions)
 
-            past_flat = past.view(B, T * F)
-            pred_future = model(past_flat)
+            pred_future = model({"PAST": past, "IMAGES": images, "INTENT": intent})
             pred_future = pred_future.view(B, -1, 2)
             pred_trajectories.append(pred_future.squeeze(0).cpu())
             gt_trajectories.append(future.squeeze(0).cpu())
@@ -282,27 +291,35 @@ if __name__ == "__main__":
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    checkpoint = torch.load(args.model_path, map_location="cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     in_dim = 16 * 6  # Past: (B, 16, 6)
     out_dim = 20 * 2  # Future: (B, 20, 2)
-    model = BaseModel(in_dim=in_dim, out_dim=out_dim)
+    model = MonocularModel(in_dim=in_dim, out_dim=out_dim, feature_extractor=SAMFeatures())
 
-    if "state_dict" in checkpoint:
-        # Lightning checkpoint
-        state_dict = {}
-        for key, value in checkpoint["state_dict"].items():
-            # Remove 'model.' prefix if it's there
-            new_key = key.replace("model.", "") if key.startswith("model.") else key
-            state_dict[new_key] = value
-        model.load_state_dict(state_dict)
-    else:
-        model.load_state_dict(checkpoint)
+    # HACK: fix for loading torch.compile()d models
+    ckpt = torch.load(args.model_path, map_location="cpu")
+    state = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
+    mapped = {}
+    for k, v in state.items():
+        k = k.replace("model._orig_mod.", "").replace("model.", "")
+        if k.startswith("features.sam_pos_embed"):
+            k = k.replace("features.sam_pos_embed", "features.sam_model.model.pos_embed")
+        elif k.startswith("features.sam_pos_embed_window"):
+            k = k.replace("features.sam_pos_embed_window", "features.sam_model.model.pos_embed_window")
+        elif k.startswith("features.sam_patch_embed"):
+            k = k.replace("features.sam_patch_embed", "features.sam_model.model.patch_embed")
+        elif k.startswith("features.sam_blocks"):
+            k = k.replace("features.sam_blocks", "features.sam_model.model.blocks")
+        mapped[k] = v
 
+    model.load_state_dict(mapped, strict=True)
+    model.to(device)
     model.eval()
 
+
     past_trajectories, pred_trajectories, gt_trajectories = gen_viz_data(
-        model, args.data_root, args.num_samples
+        model, args.data_root, args.num_samples, device
     )
 
     metrics = calculate_metrics(pred_trajectories, gt_trajectories)
