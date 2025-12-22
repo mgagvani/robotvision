@@ -94,6 +94,11 @@ class MonocularModel(nn.Module):
             nn.Linear(self.feature_dim, out_dim),
         )
 
+        # LayerNorms
+        self.token_norm = nn.LayerNorm(self.feature_dim)
+        self.query_norm = nn.LayerNorm(self.feature_dim)
+        self.attn_norm = nn.LayerNorm(self.feature_dim)
+
 
     def forward(self, x: dict) -> torch.Tensor:
         # past: (B, 16, 6), intent: int
@@ -110,6 +115,7 @@ class MonocularModel(nn.Module):
         else:
             tokens = feats.flatten(2)  # (B, C, N)
         tokens = torch.permute(tokens, (0, 2, 1)) + self.positional_encoding # (B, N, C_total)
+        tokens = self.token_norm(tokens)
 
         # attention
         key = self.key_projection(tokens) # (B, 256, 1152)
@@ -118,8 +124,9 @@ class MonocularModel(nn.Module):
         intent_onehot = F.one_hot((intent - 1).long(), num_classes=3).float()  # (B, 3). minus 1 --> 0, 1, 2
         past_flat = past.view(past.size(0), -1)  # (B, 96)
         query = self.query(torch.cat([intent_onehot, past_flat], dim=1)).unsqueeze(1)  # (B, 1, 256)
+        query = self.query_norm(query)
 
-
-        scores = query @ key.permute((0, 2, 1)) # (B, 1, 256) single value per token
+        scores = query @ key.permute((0, 2, 1)) # (B, T, N)
         attention = F.softmax(scores / sqrt(key.shape[2]), dim=2) @ value # (B, 1, 40)
+        attention = self.attn_norm(attention)
         return self.decoder(attention.squeeze(1))  # (B, 40)
