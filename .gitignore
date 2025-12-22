@@ -1,6 +1,7 @@
 # Project-specific
 **/visualizations/**
 **/tmp/**
+**/*logs/**
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

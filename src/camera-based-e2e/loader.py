@@ -17,10 +17,19 @@ devices = ['cuda:0', 'cuda:1']
 random.seed(42) # Deterministic
 
 class WaymoE2E(IterableDataset): 
-    def __init__(self, batch_size, indexFile = 'index.pkl', data_dir='./dataset', images = True, n_items: Optional[int] = None):
+    def __init__(
+        self,
+        batch_size,
+        indexFile = 'index.pkl',
+        data_dir='./dataset',
+        images = True,
+        n_items: Optional[int] = None,
+        seed: Optional[int] = None,
+    ):
         self.images = images
         self.data_dir = data_dir
         self.batch_size = batch_size
+        self.seed = seed
 
         self.filename = ""
         self.file = None
@@ -33,8 +42,9 @@ class WaymoE2E(IterableDataset):
         # TODO: Determine how to sample specific subsets of the data that we care about.
         if n_items is not None and n_items < len(self.indexes):
             total = len(self.indexes)
-            # pick a random start such that a contiguous block of size n_items fits
-            start = random.randint(0, total - n_items)
+            # pick a deterministic contiguous block when a seed is provided
+            rng = random.Random(seed) if seed is not None else random
+            start = rng.randint(0, total - n_items)
             self.indexes = self.indexes[start : start + n_items]
 
 
