@@ -9,6 +9,100 @@ from math import sqrt
 
 from .base_model import BaseModel, LitModel
 
+class ViTIntermediateFeatures(nn.Module):
+    """
+    Generic ViT feature extractor that returns token maps from selected transformer blocks.
+    """
+    def __init__(
+        self,
+        model_name: str,
+        layer_indices: Optional[List[int]] = None,
+        frozen: bool = True,
+        use_cls_token: bool = False,
+    ):
+        super(ViTIntermediateFeatures, self).__init__()
+
+        self.model_name = model_name
+        self.model = timm.create_model(model_name, pretrained=True)
+        if not hasattr(self.model, "blocks"):
+            raise ValueError(f"{model_name} is not a ViT-style model with transformer blocks")
+
+        self.num_blocks = len(self.model.blocks)
+        if layer_indices is None:
+            start = self.num_blocks // 2
+            self.layer_indices = list(range(start, self.num_blocks))
+        else:
+            for idx in layer_indices:
+                if idx < 0 or idx >= self.num_blocks:
+                    raise ValueError(f"Layer index {idx} out of range for {model_name} with {self.num_blocks} blocks")
+            self.layer_indices = sorted(layer_indices)
+
+        self.data_config = timm.data.resolve_data_config(model=self.model)
+        self.transforms = timm.data.create_transform(**self.data_config, is_training=False)
+        self.use_cls_token = use_cls_token
+        self.frozen = frozen
+
+        if frozen:
+            for param in self.model.parameters():
+                param.requires_grad = False
+            self.model.eval()
+
+        self.embed_dim = getattr(self.model, "embed_dim", getattr(self.model, "num_features", None))
+        self.dims = [self.embed_dim for _ in self.layer_indices]
+
+        patch = getattr(self.model, "patch_embed", None)
+        patch_size = getattr(patch, "patch_size", None) if patch is not None else None
+        if isinstance(patch_size, (tuple, list)):
+            patch_size = patch_size[0]
+        if patch_size is None and patch is not None and hasattr(patch, "num_patches"):
+            num_patches = getattr(patch, "num_patches")
+            side = int(round(sqrt(num_patches))) if num_patches > 0 else 0
+            input_h = self.data_config["input_size"][1]
+            patch_size = input_h // side if side > 0 else None
+
+        # ensure patch_size is always set to a sensible default
+        self.patch_size = patch_size or 16
+
+    def _tokens_to_map(self, tokens: torch.Tensor) -> torch.Tensor:
+        """Convert sequence tokens to (B, C, H, W) grid."""
+        num_prefix = getattr(self.model, "num_prefix_tokens", 1 if getattr(self.model, "cls_token", None) is not None else 0)
+        if not self.use_cls_token and num_prefix > 0:
+            tokens = tokens[:, num_prefix:, :]
+
+        B, seq_len, dim = tokens.shape
+        side = int(round(sqrt(seq_len)))
+        if side * side != seq_len:
+            # fall back to (B, C, N, 1) when not a perfect square
+            return tokens.transpose(1, 2).unsqueeze(-1)
+
+        if self.patch_size is None and "input_size" in self.data_config:
+            input_h = self.data_config["input_size"][1]
+            if input_h % side == 0:
+                self.patch_size = input_h // side
+
+        return tokens.transpose(1, 2).reshape(B, dim, side, side)
+
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+        x_t = self.transforms(x.float())  # preprocess to model expected size
+
+        outputs = {}
+        handles = []
+        for layer_idx in self.layer_indices:
+            handle = self.model.blocks[layer_idx].register_forward_hook(
+                lambda module, inp, out, idx=layer_idx: outputs.setdefault(idx, out)
+            )
+            handles.append(handle)
+
+        forward_ctx = torch.no_grad() if self.frozen else torch.enable_grad()
+        with forward_ctx:
+            _ = self.model.forward_features(x_t)
+
+        for handle in handles:
+            handle.remove()
+
+        maps = [self._tokens_to_map(outputs[idx]) for idx in self.layer_indices]
+        return maps
+
 class DINOFeatures(nn.Module):
     def __init__(self, model_name: str = "vit_small_plus_patch16_dinov3.lvd1689m", frozen: bool = True):
         super(DINOFeatures, self).__init__()
