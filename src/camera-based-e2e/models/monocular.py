@@ -8,6 +8,7 @@ import timm
 from math import sqrt
 
 from .base_model import BaseModel, LitModel
+from .blocks import TransformerBlock
 
 class DINOFeatures(nn.Module):
     def __init__(self, model_name: str = "vit_small_plus_patch16_dinov3.lvd1689m", frozen: bool = True):
@@ -130,3 +131,57 @@ class MonocularModel(nn.Module):
         attention = F.softmax(scores / sqrt(key.shape[2]), dim=2) @ value # (B, 1, 40)
         attention = self.attn_norm(attention)
         return self.decoder(attention.squeeze(1))  # (B, 40)
+
+class DeepMonocularModel(nn.Module):
+    def __init__(self, feature_extractor, out_dim, n_layers=1):
+        super().__init__()
+        self.features = feature_extractor
+        self.features.eval()
+        self.feature_dim = sum(self.features.dims)
+        
+        # Initial Query Projection (Intent + Past -> C)
+        query_input_dim = 3 + 16 * 6
+        self.query_init = nn.Linear(query_input_dim, self.feature_dim)
+
+        # learnable positional encoding
+        self.n_tokens = self.features.data_config["input_size"][1] // self.features.patch_size * (self.features.data_config["input_size"][2] // self.features.patch_size)
+        self.positional_encoding = nn.Parameter(nn.init.trunc_normal_(torch.zeros((1, self.n_tokens, self.feature_dim)), std=0.02)) # (1, N, C)
+        
+        # Deep network rather than single attention in MonocularModel 
+        self.blocks = nn.ModuleList([
+            TransformerBlock(self.feature_dim, num_heads=8, mlp_dim=self.feature_dim*4)
+            for _ in range(n_layers)
+        ])
+        
+        self.decoder = nn.Sequential(
+            nn.Linear(self.feature_dim, self.feature_dim),
+            nn.GELU(),
+            nn.Linear(self.feature_dim, out_dim),
+        )
+
+    def forward(self, x):
+        # Copied from MonocularModel
+        # past: (B, 16, 6), intent: int
+        past, images, intent = x['PAST'], x['IMAGES'], x['INTENT']
+        
+        # Ref: https://github.com/waymo-research/waymo-open-dataset/blob/5f8a1cd42491210e7de629b6f8fc09b65e0cbe99/src/waymo_open_dataset/dataset.proto#L50%20%20order%20=%20[2,%201,%203]
+        front_cam = images[1]
+        with torch.no_grad():
+            feats = self.features(front_cam)  # list or tensor
+
+        # tokens: handle list of features or single tensor
+        if isinstance(feats, (list, tuple)):
+            tokens = torch.cat([f.flatten(2) for f in feats], dim=1)  # (B, C_total, N)
+        else:
+            tokens = feats.flatten(2)  # (B, C, N)
+        tokens = torch.permute(tokens, (0, 2, 1)) + self.positional_encoding # (B, N, C_total)
+        
+        # copy procedure to build query_0 from MonocularModel
+        intent_onehot = F.one_hot((intent - 1).long(), num_classes=3).float()
+        past_flat = past.view(past.size(0), -1)
+        query = self.query_init(torch.cat([intent_onehot, past_flat], dim=1)).unsqueeze(1)
+
+        for block in self.blocks:
+            query = block(query, tokens)
+
+        return self.decoder(query.squeeze(1))
