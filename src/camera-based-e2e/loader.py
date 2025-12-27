@@ -67,22 +67,15 @@ class WaymoE2E(IterableDataset):
     
     def __iter__(self):
         worker = torch.utils.data.get_worker_info()
-        if worker is not None:
-            id, num_workers = worker.id, worker.num_workers
-            local_indexes = []
-            batch_id = 0
-            for i in range(0, len(self.indexes), self.batch_size):
-                if batch_id % num_workers == id:
-                    local_indexes.extend(list(range(i,  min(len(self.indexes), i + self.batch_size))))
-                
-                batch_id += 1
+        if worker is None:
+            start, step = 0, 1
         else:
-            local_indexes = list(range(len(self.indexes)))    
+            start, step = worker.id, worker.num_workers
 
-
-        for idx in local_indexes:
-            frame = e2e_pb2.E2EDFrame() # type: ignore
+        for idx in range(start, len(self.indexes), step):
+            frame = e2e_pb2.E2EDFrame()  # type: ignore
             filename, start_byte, byte_length = self.indexes[idx]
+
             if self.filename != filename:
                 if self.file:
                     self.file.close()
@@ -125,7 +118,7 @@ if __name__ == "__main__":
     def main():
         # start = time.time()
         for batch_of_frames in tqdm(loader):
-            print(batch_of_frames["INTENT"])
+            # print(batch_of_frames["INTENT"])
             # print(batch_of_frames.keys(), [b.shape for b in batch_of_frames.values() if isinstance(b, torch.Tensor)])
             pass
         # print("Total Time:", time.time()-start)
