@@ -19,7 +19,6 @@ random.seed(42) # Deterministic
 class WaymoE2E(IterableDataset): 
     def __init__(
         self,
-        batch_size,
         indexFile = 'index.pkl',
         data_dir='./dataset',
         images = True,
@@ -28,7 +27,6 @@ class WaymoE2E(IterableDataset):
     ):
         self.images = images
         self.data_dir = data_dir
-        self.batch_size = batch_size
         self.seed = seed
 
         self.filename = ""
