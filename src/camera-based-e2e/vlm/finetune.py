@@ -107,14 +107,16 @@ model = Qwen3VLForConditionalGeneration.from_pretrained(
     device_map="auto",
     _attn_implementation="sdpa",  # make it flash_attention_2 for a100/h100
 )
+model.enable_input_require_grads()
 
 # Freeze vision encoder initially (recommended for first run)
-for p in model.model.visual.parameters():
-    p.requires_grad = False
+# unfreeze it :)
+# for p in model.model.visual.parameters():
+#     p.requires_grad = True
 
 if USE_LORA:
     lora_config = LoraConfig(
-        r=16,
+        r=128,
         lora_alpha=16,
         lora_dropout=0.05,
         target_modules=["q_proj","k_proj","v_proj","o_proj","up_proj","down_proj","gate_proj"],
@@ -124,7 +126,6 @@ if USE_LORA:
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
     model.config.use_cache = False
-    model.enable_input_require_grads()
 
 # ---- dataset ----
 DATA_DIR = "/scratch/gilbreth/mgagvani/wod/waymo_open_dataset_end_to_end_camera_v_1_0_0/"
@@ -132,7 +133,7 @@ train_dataset = WaymoE2E(
     indexFile="index_train.pkl",
     data_dir=DATA_DIR,
     images=True,
-    n_items=500, 
+    n_items=2500, 
     seed=42,
 )
 
@@ -141,10 +142,10 @@ training_args = TrainingArguments(
     num_train_epochs=1,
     per_device_train_batch_size=1,
     gradient_accumulation_steps=4,
-    learning_rate=2e-4,
+    learning_rate=1e-4,
     warmup_steps=200,
     weight_decay=0.01,
-    logging_steps=10,
+    logging_steps=1,
     save_strategy="steps",
     save_steps=500,
     save_total_limit=2,
