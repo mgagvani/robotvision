@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Experiment outputs - checkpoints (too large for GitHub)
+experiments/ablation/outputs/checkpoints/
+
+# Experiment outputs - logs (regenerated each run)
+experiments/ablation/outputs/logs/
+experiments/ablation/outputs/slurm_logs/
+
+# Data index files (can be regenerated)
+experiments/ablation/index_train.pkl
+experiments/ablation/index_val.pkl
+
+# Keep only summary visualizations, not individual experiment plots
+experiments/ablation/outputs/visualizations/*_loss.png
+!experiments/ablation/outputs/visualizations/loss_comparison.png
+!experiments/ablation/outputs/visualizations/loss_heatmap.png
+!experiments/ablation/outputs/visualizations/loss_vs_features.png
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# Data files (large datasets)
+*.tfrecord
+data/
+scratch/
+
+# Model checkpoints (general)
+*.ckpt
+*.pth
+*.pt
+!experiments/ablation/outputs/checkpoints/.gitkeep
+
+# Logs
+*.log
+logs/
+

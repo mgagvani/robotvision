@@ -1,0 +1,242 @@
+[
+  {
+    "name": "base_pos",
+    "model_type": "base",
+    "use_position": true,
+    "use_velocity": false,
+    "use_acceleration": false,
+    "use_intent": false
+  },
+  {
+    "name": "base_vel",
+    "model_type": "base",
+    "use_position": false,
+    "use_velocity": true,
+    "use_acceleration": false,
+    "use_intent": false
+  },
+  {
+    "name": "base_acc",
+    "model_type": "base",
+    "use_position": false,
+    "use_velocity": false,
+    "use_acceleration": true,
+    "use_intent": false
+  },
+  {
+    "name": "base_intent",
+    "model_type": "base",
+    "use_position": false,
+    "use_velocity": false,
+    "use_acceleration": false,
+    "use_intent": true
+  },
+  {
+    "name": "base_pos_vel",
+    "model_type": "base",
+    "use_position": true,
+    "use_velocity": true,
+    "use_acceleration": false,
+    "use_intent": false
+  },
+  {
+    "name": "base_pos_acc",
+    "model_type": "base",
+    "use_position": true,
+    "use_velocity": false,
+    "use_acceleration": true,
+    "use_intent": false
+  },
+  {
+    "name": "base_pos_intent",
+    "model_type": "base",
+    "use_position": true,
+    "use_velocity": false,
+    "use_acceleration": false,
+    "use_intent": true
+  },
+  {
+    "name": "base_vel_acc",
+    "model_type": "base",
+    "use_position": false,
+    "use_velocity": true,
+    "use_acceleration": true,
+    "use_intent": false
+  },
+  {
+    "name": "base_vel_intent",
+    "model_type": "base",
+    "use_position": false,
+    "use_velocity": true,
+    "use_acceleration": false,
+    "use_intent": true
+  },
+  {
+    "name": "base_acc_intent",
+    "model_type": "base",
+    "use_position": false,
+    "use_velocity": false,
+    "use_acceleration": true,
+    "use_intent": true
+  },
+  {
+    "name": "base_pos_vel_acc",
+    "model_type": "base",
+    "use_position": true,
+    "use_velocity": true,
+    "use_acceleration": true,
+    "use_intent": false
+  },
+  {
+    "name": "base_pos_vel_intent",
+    "model_type": "base",
+    "use_position": true,
+    "use_velocity": true,
+    "use_acceleration": false,
+    "use_intent": true
+  },
+  {
+    "name": "base_pos_acc_intent",
+    "model_type": "base",
+    "use_position": true,
+    "use_velocity": false,
+    "use_acceleration": true,
+    "use_intent": true
+  },
+  {
+    "name": "base_vel_acc_intent",
+    "model_type": "base",
+    "use_position": false,
+    "use_velocity": true,
+    "use_acceleration": true,
+    "use_intent": true
+  },
+  {
+    "name": "base_pos_vel_acc_intent",
+    "model_type": "base",
+    "use_position": true,
+    "use_velocity": true,
+    "use_acceleration": true,
+    "use_intent": true
+  },
+  {
+    "name": "vision_pos",
+    "model_type": "vision",
+    "use_position": true,
+    "use_velocity": false,
+    "use_acceleration": false,
+    "use_intent": false
+  },
+  {
+    "name": "vision_vel",
+    "model_type": "vision",
+    "use_position": false,
+    "use_velocity": true,
+    "use_acceleration": false,
+    "use_intent": false
+  },
+  {
+    "name": "vision_acc",
+    "model_type": "vision",
+    "use_position": false,
+    "use_velocity": false,
+    "use_acceleration": true,
+    "use_intent": false
+  },
+  {
+    "name": "vision_intent",
+    "model_type": "vision",
+    "use_position": false,
+    "use_velocity": false,
+    "use_acceleration": false,
+    "use_intent": true
+  },
+  {
+    "name": "vision_pos_vel",
+    "model_type": "vision",
+    "use_position": true,
+    "use_velocity": true,
+    "use_acceleration": false,
+    "use_intent": false
+  },
+  {
+    "name": "vision_pos_acc",
+    "model_type": "vision",
+    "use_position": true,
+    "use_velocity": false,
+    "use_acceleration": true,
+    "use_intent": false
+  },
+  {
+    "name": "vision_pos_intent",
+    "model_type": "vision",
+    "use_position": true,
+    "use_velocity": false,
+    "use_acceleration": false,
+    "use_intent": true
+  },
+  {
+    "name": "vision_vel_acc",
+    "model_type": "vision",
+    "use_position": false,
+    "use_velocity": true,
+    "use_acceleration": true,
+    "use_intent": false
+  },
+  {
+    "name": "vision_vel_intent",
+    "model_type": "vision",
+    "use_position": false,
+    "use_velocity": true,
+    "use_acceleration": false,
+    "use_intent": true
+  },
+  {
+    "name": "vision_acc_intent",
+    "model_type": "vision",
+    "use_position": false,
+    "use_velocity": false,
+    "use_acceleration": true,
+    "use_intent": true
+  },
+  {
+    "name": "vision_pos_vel_acc",
+    "model_type": "vision",
+    "use_position": true,
+    "use_velocity": true,
+    "use_acceleration": true,
+    "use_intent": false
+  },
+  {
+    "name": "vision_pos_vel_intent",
+    "model_type": "vision",
+    "use_position": true,
+    "use_velocity": true,
+    "use_acceleration": false,
+    "use_intent": true
+  },
+  {
+    "name": "vision_pos_acc_intent",
+    "model_type": "vision",
+    "use_position": true,
+    "use_velocity": false,
+    "use_acceleration": true,
+    "use_intent": true
+  },
+  {
+    "name": "vision_vel_acc_intent",
+    "model_type": "vision",
+    "use_position": false,
+    "use_velocity": true,
+    "use_acceleration": true,
+    "use_intent": true
+  },
+  {
+    "name": "vision_pos_vel_acc_intent",
+    "model_type": "vision",
+    "use_position": true,
+    "use_velocity": true,
+    "use_acceleration": true,
+    "use_intent": true
+  }
+]

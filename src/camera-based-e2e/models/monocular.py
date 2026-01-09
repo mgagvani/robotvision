@@ -10,10 +10,16 @@ from math import sqrt
 from .base_model import BaseModel, LitModel
 
 class DINOFeatures(nn.Module):
-    def __init__(self, model_name: str = "vit_small_plus_patch16_dinov3.lvd1689m", frozen: bool = True):
+    def __init__(self, model_name: str = "vit_small_patch16_224.dino", frozen: bool = True):
         super(DINOFeatures, self).__init__()
 
-        self.dino_model = timm.create_model(model_name, pretrained=True, features_only=True)
+        # Try to load with pretrained weights, fall back to random init if not available
+        try:
+            self.dino_model = timm.create_model(model_name, pretrained=True, features_only=True)
+        except (RuntimeError, ValueError) as e:
+            print(f"Warning: Could not load pretrained weights for {model_name}: {e}")
+            print(f"Falling back to random initialization")
+            self.dino_model = timm.create_model(model_name, pretrained=False, features_only=True)
         self.data_config = timm.data.resolve_data_config(model=self.dino_model)
         self.transforms = timm.data.create_transform(**self.data_config, is_training=False)
         if frozen:
@@ -33,14 +39,20 @@ class DINOFeatures(nn.Module):
 class SAMFeatures(nn.Module):
     def __init__(
         self,
-        model_name: str = "timm/sam2_hiera_tiny.fb_r896_2pt1",
+        model_name: str = "sam2_hiera_tiny",
         frozen: bool = True,
         feature_stage: int = -1,
     ):
         super(SAMFeatures, self).__init__()
 
         # features_only returns a list of stage outputs
-        self.sam_model = timm.create_model(model_name, pretrained=True, features_only=True)
+        # Try to load with pretrained weights, fall back to random init if not available
+        try:
+            self.sam_model = timm.create_model(model_name, pretrained=True, features_only=True)
+        except (RuntimeError, ValueError) as e:
+            print(f"Warning: Could not load pretrained weights for {model_name}: {e}")
+            print(f"Falling back to random initialization")
+            self.sam_model = timm.create_model(model_name, pretrained=False, features_only=True)
         self.data_config = timm.data.resolve_data_config(model=self.sam_model)
         self.transforms = timm.data.create_transform(**self.data_config, is_training=False)
         if frozen:
