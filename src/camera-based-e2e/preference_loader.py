@@ -11,6 +11,7 @@ from io import BytesIO
 import cv2 
 from typing import Optional
 import random
+from models.base_model import collate_with_images
 
 devices = ['cuda:0', 'cuda:1']
 
@@ -43,8 +44,6 @@ class WaymoE2E(IterableDataset):
             rng = random.Random(seed) if seed is not None else random
             start = rng.randint(0, total - n_items)
             self.indexes = self.indexes[start : start + n_items]
-
-
 
     def decode_img(self, img):
         if not self.images:
@@ -96,8 +95,10 @@ class WaymoE2E(IterableDataset):
             # For submission to waymo evaluation server
             name = frame.frame.context.name
 
-            # returns dictionary of past, future, images, intent
-            yield {'PAST': past, 'FUTURE': future, 'IMAGES': [self.decode_img(images.image) for images in frame.frame.images], 'INTENT': frame.intent, 'NAME': name}
+            for traj in frame.preference_trajectories:
+                # stack x, y
+                traj_array = np.stack([traj.pos_x, traj.pos_y], axis=-1)  # shape (T, 2), T = timesteps
+                yield {'PAST': past, 'FUTURE': future, 'IMAGES': [self.decode_img(images.image) for images in frame.frame.images], 'INTENT': frame.intent, 'NAME': name, 'PREF_TRAJ': traj_array, 'PREF_SCORE': traj.preference_score}
 
 if __name__ == "__main__":
 
@@ -111,7 +112,8 @@ if __name__ == "__main__":
     loader = DataLoader(
         dataset, 
         batch_size=BATCH_SIZE,
-        num_workers=16,
+        num_workers=16, 
+        collate_fn=collate_with_images
     )
     
     #now we have this laoder class that I can iterate over like an array

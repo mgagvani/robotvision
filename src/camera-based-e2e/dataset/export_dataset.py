@@ -15,17 +15,18 @@ from protos import dataset_pb2, e2e_pb2, map_pb2
 
 def safe_name(name: str) -> str:
     # Keep filesystem-friendly ASCII.
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", name) #substitutes any non ascii chars with _
 
 
-def camera_name(name_enum: int) -> str:
+def camera_name(name_enum: int) -> str: #which camera (front, left, etc)
     return dataset_pb2.CameraName.Name.Name(name_enum)
+    #access dataset_pb2 class, then CameraName nested class, then Name enum nested class, then Name constructor method to get string name
 
 
 def intent_name(intent_enum: int) -> str:
     return e2e_pb2.EgoIntent.Intent.Name(intent_enum)
 
-
+#NOT SURE ABOUT THIS FUNCTION
 def transform_list(transform_msg) -> list:
     return list(transform_msg.transform)
 

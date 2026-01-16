@@ -58,7 +58,6 @@ message CameraName {
     REAR_LEFT = 6;
     REAR = 7;
     REAR_RIGHT = 8;
-
   }
 }
 
