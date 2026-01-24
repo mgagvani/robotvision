@@ -7,28 +7,36 @@ import pytorch_lightning as pl
 import timm
 from math import sqrt
 
-from .base_model import BaseModel, LitModel
+from .base_model import LitModel
 from .blocks import TransformerBlock
 
 class DINOFeatures(nn.Module):
-    def __init__(self, model_name: str = "vit_small_plus_patch16_dinov3.lvd1689m", frozen: bool = True):
+    def __init__(self, model_name: str = "vit_tiny_plus_patch16_dinov3.lvd1689m", frozen: bool = True):
         super(DINOFeatures, self).__init__()
 
+        # load in dino classification model
+        # features_only returns a list of layer outputs
         self.dino_model = timm.create_model(model_name, pretrained=True, features_only=True)
+
+        #sets up input preprocessing transforms
         self.data_config = timm.data.resolve_data_config(model=self.dino_model)
         self.transforms = timm.data.create_transform(**self.data_config, is_training=False)
+
+        # freezes the weights and doesn't continue training the model
         if frozen:
             for param in self.dino_model.parameters():
                 param.requires_grad = False
 
-        self.dims = [384, 384, 384]  # feature dims for each layer
+        self.dims = [384, 384, 384]  # feature the number of channels/features extracted at each layer
+        # intermediate layer outputs are also returned and useful
+
         self.patch_size = 16  # patch size
 
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
         # x: (B, 3, H, W)
         # transforms: resize 256x256, center crop, normalize
-        x_t = self.transforms(x.float()) # preprocess
-        features = self.dino_model(x_t)
+        x_t = self.transforms(x.float()) # preprocess input
+        features = self.dino_model(x_t) # 3 layers all with 384 channels/features and 16x16 patches
         return features # 3 x [B, 384, 16, 16]
     
 class SAMFeatures(nn.Module):
@@ -49,12 +57,13 @@ class SAMFeatures(nn.Module):
                 param.requires_grad = False
 
         channels = self.sam_model.feature_info.channels()
-        reductions = self.sam_model.feature_info.reduction()
-        self.feature_stage = feature_stage
-        self.dims = [channels[feature_stage]]
-        self.patch_size = reductions[feature_stage]  # effective stride
+        reductions = self.sam_model.feature_info.reduction() #input is shrunk by cumulative factor of reductions (array) at each stage
 
-    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+        self.feature_stage = feature_stage # chooses which feature stage to output (-1 = last)
+        self.dims = [channels[feature_stage]]
+        self.patch_size = reductions[feature_stage]  # sets patch size to reduction at that stage
+
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]: 
         # x: (B, 3, H, W)
         x_t = self.transforms(x.float())  # preprocess
         feats = self.sam_model(x_t)       # list of feature maps
@@ -83,6 +92,7 @@ class MonocularModel(nn.Module):
         self.query = nn.Sequential(
             nn.Linear(query_input_dim, self.feature_dim),
             nn.LeakyReLU(),
+            nn.Dropout(p=0.1),
             nn.Linear(self.feature_dim, self.feature_dim),
         )
 
@@ -94,6 +104,7 @@ class MonocularModel(nn.Module):
         self.decoder = nn.Sequential(
             nn.Linear(self.feature_dim, self.feature_dim),
             nn.LeakyReLU(),
+            nn.Dropout(p=0.1),
             nn.Linear(self.feature_dim, out_dim),
         )
 

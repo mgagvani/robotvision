@@ -71,7 +71,7 @@ if __name__ == "__main__":
     in_dim = 16 * 6 + 3 + 21 * 2 
     out_dim = 1  
 
-    model = DeepMonocularModel(out_dim=out_dim, feature_extractor=SAMFeatures(model_name="timm/vit_pe_spatial_tiny_patch16_512.fb"))
+    model = MonocularModel(in_dim=in_dim, out_dim=out_dim, feature_extractor=SAMFeatures(model_name="timm/vit_pe_spatial_tiny_patch16_512.fb"))
     lit_model = LitModel(model=torch.compile(model, mode="max-autotune"), lr=args.lr)
 
     base_path = Path(args.data_dir).parent.as_posix()
@@ -91,27 +91,6 @@ if __name__ == "__main__":
     )
 
     trainer.fit(lit_model, train_loader, val_loader)
-
-    # Export loss graph to visualizations/
-    try:
-        base_path = Path(base_path)
-        run_dir = sorted((base_path / "logs").glob("camera_e2e_*"))[-1]  # newest run
-        metrics = pd.read_csv(run_dir / "version_0" / "metrics.csv")
-        train = metrics[metrics["train_loss"].notna()]
-        val = metrics[metrics["val_loss"].notna()]
-
-        plt.figure()
-        plt.plot(train["step"], train["train_loss"], label="train_loss")
-        plt.plot(val["step"], val["val_loss"], label="val_loss")
-        plt.xlabel("Step")
-        plt.ylabel("Loss")
-        plt.legend()
-        plt.tight_layout()
-        out = Path("./visualizations")
-        plt.savefig(out / "loss.png", dpi=200)
-    except Exception as e:
-        print(f"Could not save loss plot: {e}")
-
 
 
 
