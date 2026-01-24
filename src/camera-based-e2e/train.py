@@ -22,14 +22,14 @@ from models.monocular import MonocularModel, DeepMonocularModel, SAMFeatures
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', type=str, required=True, help='Path to Waymo E2E data directory')
-    parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=4, help='Batch size for training')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--max_epochs', type=int, default=10, help='Number of epochs to train')
     args = parser.parse_args()
 
     # Data 
-    train_dataset = WaymoE2E(batch_size=args.batch_size, indexFile='index_train.pkl', data_dir=args.data_dir, images=True, n_items=250000)
-    test_dataset = WaymoE2E(batch_size=args.batch_size, indexFile='index_val.pkl', data_dir=args.data_dir, images=True, n_items=50000)
+    train_dataset = WaymoE2E(indexFile='index_train.pkl', data_dir=args.data_dir, images=True, n_items=250000)
+    test_dataset = WaymoE2E(indexFile='index_val.pkl', data_dir=args.data_dir, images=True, n_items=50000)
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=12, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
     val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=12, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)

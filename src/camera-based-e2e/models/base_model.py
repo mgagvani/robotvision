@@ -36,6 +36,60 @@ class LitModel(pl.LightningModule):
         """
         return torch.mean(torch.norm(pred - gt, dim=-1))
     
+    def time_thresholds(self, t_idx):
+        # loss function defines time-based thresholds at 3s and 5s
+
+        lat = torch.where(t_idx <= 3, 1.0, 1.8)
+        lng = torch.where(t_idx <= 3, 4.0, 7.2)
+        return lat, lng
+    
+    def speed_scale(self, v):
+        # speed-based scaling function, copied from paper
+        return torch.where(
+            v < 1.4, 
+            0.5,
+            torch.where(
+                v < 11.0,
+                0.5 + 0.5 * (v - 1.4) / (11.0 - 1.4),
+                1.0
+            )
+        )
+
+    def rfs_loss(self, pred, gt, speed, t_idx, r_bar=1.0):
+        """
+        pred, gt: (B, T, 2)
+        speed: (B, T)
+        t_idx: (T,) or (B, T)
+        """
+        # errors
+        delta = torch.abs(pred - gt) # (B, T, 2)
+        delta_lat = delta[..., 1] # (B, T, 1)
+        delta_lng = delta[..., 0] # (B, T, 1)
+
+        # thresholds
+        tau_lat_raw, tau_lng_raw = self.time_thresholds(t_idx)
+        scale = self.speed_scale(speed)
+
+        tau_lat = tau_lat_raw * scale
+        tau_lng = tau_lng_raw * scale
+
+        # normalized deviation, Delta > 1 == outside acceptable error
+        Delta = torch.max(
+            delta_lat / tau_lat,
+            delta_lng / tau_lng
+        )
+        
+        # RFS score
+        score = torch.where(
+            Delta <= 1,
+            torch.ones_like(Delta),
+            torch.pow(0.1, Delta - 1)
+        )
+
+        # normalized loss
+        loss = 1.0 - score
+        return loss.mean()
+    
     # ---- optimizers ----
     def configure_optimizers(self):
         # NOTE: This can be extended and tuned, LR especially will differ and have an impact.
@@ -55,15 +109,23 @@ class LitModel(pl.LightningModule):
         # create all input data that we are allowed to give to a model
         model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent}
 
-        pred_future = self.forward(model_inputs)  # (B, T*2)
-        loss = self.ade_loss(pred_future.reshape_as(future), future)  # reshape to (B, T, 2
+        speed = torch.norm(past[..., 2:4], dim=-1)  # (B, 16)
 
+        #create a batch of time indices from 1 to 20
+        t_idx = torch.tensor([3, 5], device=future.device).unsqueeze(0).repeat(future.size(0), 1)  # (B, 2)
+
+        pred_future = self.forward(model_inputs)  # (B, T*2)
+        pred_future = pred_future.reshape_as(future)  # (B, T, 2)
+
+        rfs_loss = self.rfs_loss(pred_future[:, [11, 19], :], future[:, [11, 19], :] , speed[:, -1].unsqueeze(1).repeat(1,2), t_idx)  # reshape to (B, T, 2)
+        ade_loss = self.ade_loss(pred_future, future)
         # TODO: improve logging both to disk and to console
         self.log_dict({
-            f"{stage}_loss": loss,
+            f"{stage}_rfs_loss": rfs_loss,
+            f"{stage}_ade_loss": ade_loss,
         }, prog_bar=True, logger=True)
 
-        return loss
+        return rfs_loss
     
     def training_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, "train")
