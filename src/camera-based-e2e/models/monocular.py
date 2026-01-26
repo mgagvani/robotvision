@@ -27,7 +27,7 @@ class DINOFeatures(nn.Module):
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
         # x: (B, 3, H, W)
         # transforms: resize 256x256, center crop, normalize
-        x_t = self.transforms(x.float()) # preprocess
+        x_t = self.transforms(x.float().div(255.0)) # preprocess
         features = self.dino_model(x_t)
         return features # 3 x [B, 384, 16, 16]
     
@@ -56,7 +56,7 @@ class SAMFeatures(nn.Module):
 
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
         # x: (B, 3, H, W)
-        x_t = self.transforms(x.float())  # preprocess
+        x_t = self.transforms(x.float().div(255.0))  # preprocess
         feats = self.sam_model(x_t)       # list of feature maps
         return [feats[self.feature_stage]]
 
@@ -163,6 +163,11 @@ class DeepMonocularModel(nn.Module):
         # Copied from MonocularModel
         # past: (B, 16, 6), intent: int
         past, images, intent = x['PAST'], x['IMAGES'], x['INTENT']
+
+        # NOTE: DEBUG. REMOVE THIS LATER!!!
+        # want to isolate the image fix to see if it's good or not
+        past = torch.zeros_like(past)
+        # intent = torch.ones_like(intent)
         
         # Ref: https://github.com/waymo-research/waymo-open-dataset/blob/5f8a1cd42491210e7de629b6f8fc09b65e0cbe99/src/waymo_open_dataset/dataset.proto#L50%20%20order%20=%20[2,%201,%203]
         front_cam = images[1]
