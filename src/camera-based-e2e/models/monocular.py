@@ -140,7 +140,7 @@ class DeepMonocularModel(nn.Module):
         self.feature_dim = sum(self.features.dims)
         
         # Initial Query Projection (Intent + Past -> C)
-        query_input_dim = 3 + 16 * 6 + (2) + 20
+        query_input_dim = 3 + 16 * 6 + (2 * 20)
         self.query_init = nn.Linear(query_input_dim, self.feature_dim)
 
         # learnable positional encoding
@@ -156,13 +156,14 @@ class DeepMonocularModel(nn.Module):
         self.decoder = nn.Sequential(
             nn.Linear(self.feature_dim, self.feature_dim),
             nn.GELU(),
-            nn.Linear(self.feature_dim, 2),
+            nn.Linear(self.feature_dim, 40),
         )
 
     def forward(self, x):
         # Copied from MonocularModel
         # past: (B, 16, 6), intent: int
         past, images, intent = x['PAST'], x['IMAGES'], x['INTENT']
+        B=past.size(0)
         
         # Ref: https://github.com/waymo-research/waymo-open-dataset/blob/5f8a1cd42491210e7de629b6f8fc09b65e0cbe99/src/waymo_open_dataset/dataset.proto#L50%20%20order%20=%20[2,%201,%203]
         front_cam = images[1]
@@ -183,23 +184,21 @@ class DeepMonocularModel(nn.Module):
         past_flat = past.view(past.size(0), -1)
         base_inputs = torch.cat([intent_onehot, past_flat], dim=1)
      
-        outputs = []
 
-        current = past[:, -1, 0:2].clone()
-        for i in range(20):
+        tradj = torch.randn((B, 20, 2), device=past.device)
 
-            time_onehot = F.one_hot(torch.tensor(i), num_classes=20).float().expand(past.size(0), -1).to(past.device)
-            current_flat = current.reshape(past.size(0), -1)
+        for _ in range(20):
 
-            query_input = torch.cat([base_inputs, current_flat, time_onehot], dim=1)
+            tradj_flat = tradj.reshape(B, -1)
+            query_input = torch.cat([base_inputs, tradj_flat], dim=1)
             
             query = self.query_init(query_input).unsqueeze(1)
             
             for block in self.blocks:
                 query = block(query, tokens)
 
-            step_output = self.decoder(query.squeeze(1))
-            outputs.append(step_output)
+            # Update tradj: Decoder outputs (B, 40), we reshape to (B, 20, 2)
+            tradj = self.decoder(query.squeeze(1)).view(B, 20, 2)
             
 
-        return torch.stack(outputs, dim=1)
+        return tradj
