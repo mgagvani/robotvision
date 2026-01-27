@@ -140,12 +140,14 @@ class DeepMonocularModel(nn.Module):
         self.feature_dim = sum(self.features.dims)
         
         # Initial Query Projection (Intent + Past -> C)
-        query_input_dim = 3 + 16 * 6 + (2 * 20)
+        query_input_dim = 3 + 16 * 6 + (2 * 20) + self.feature_dim
         self.query_init = nn.Linear(query_input_dim, self.feature_dim)
 
         # learnable positional encoding
         self.n_tokens = self.features.data_config["input_size"][1] // self.features.patch_size * (self.features.data_config["input_size"][2] // self.features.patch_size)
         self.positional_encoding = nn.Parameter(nn.init.trunc_normal_(torch.zeros((1, self.n_tokens, self.feature_dim)), std=0.02)) # (1, N, C)
+
+        self.step_emb = nn.Embedding(20, self.feature_dim)
         
         # Deep network rather than single attention in MonocularModel 
         self.blocks = nn.ModuleList([
@@ -164,6 +166,7 @@ class DeepMonocularModel(nn.Module):
         # past: (B, 16, 6), intent: int
         past, images, intent = x['PAST'], x['IMAGES'], x['INTENT']
         B=past.size(0)
+        device = past.device
         
         # Ref: https://github.com/waymo-research/waymo-open-dataset/blob/5f8a1cd42491210e7de629b6f8fc09b65e0cbe99/src/waymo_open_dataset/dataset.proto#L50%20%20order%20=%20[2,%201,%203]
         front_cam = images[1]
@@ -185,12 +188,15 @@ class DeepMonocularModel(nn.Module):
         base_inputs = torch.cat([intent_onehot, past_flat], dim=1)
      
 
-        tradj = torch.randn((B, 20, 2), device=past.device)
+        tradj = torch.randn((B, 20, 2), device=device)
 
-        for _ in range(20):
+        num_steps = 20
+        for k in reversed(range(num_steps)):
+            k_tensor = torch.full((B,), k, device=device, dtype=torch.long)
+            k_emb = self.step_emb(k_tensor) # (B, feature_dim)
 
             tradj_flat = tradj.reshape(B, -1)
-            query_input = torch.cat([base_inputs, tradj_flat], dim=1)
+            query_input = torch.cat([base_inputs, tradj_flat, k_emb], dim=1)
             
             query = self.query_init(query_input).unsqueeze(1)
             
@@ -198,7 +204,10 @@ class DeepMonocularModel(nn.Module):
                 query = block(query, tokens)
 
             # Update tradj: Decoder outputs (B, 40), we reshape to (B, 20, 2)
-            tradj = self.decoder(query.squeeze(1)).view(B, 20, 2)
+            target_tradj = self.decoder(query.squeeze(1)).view(B, 20, 2)
+
+            alpha = 1.0 / (k + 1) 
+            tradj = (1 - alpha) * tradj + alpha * target_tradj
             
 
         return tradj
