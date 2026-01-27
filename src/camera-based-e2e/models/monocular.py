@@ -161,6 +161,12 @@ class DeepMonocularModel(nn.Module):
             nn.Linear(self.feature_dim, 40),
         )
 
+        self.clean = nn.Sequential(
+            nn.Linear(40, 512),
+            nn.Linear(512, 512),
+            nn.Linear(512, 40)
+        )
+
     def forward(self, x):
         # Copied from MonocularModel
         # past: (B, 16, 6), intent: int
@@ -208,6 +214,5 @@ class DeepMonocularModel(nn.Module):
 
             alpha = 1.0 / (k + 1) 
             tradj = (1 - alpha) * tradj + alpha * target_tradj
-            
 
-        return tradj
+        return self.clean(tradj.reshape(B, -1)).view(B, 20, 2)
