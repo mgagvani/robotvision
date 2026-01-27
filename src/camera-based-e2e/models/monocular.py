@@ -140,7 +140,7 @@ class DeepMonocularModel(nn.Module):
         self.feature_dim = sum(self.features.dims)
         
         # Initial Query Projection (Intent + Past -> C)
-        query_input_dim = 3 + 16 * 6 + (2 * 19)
+        query_input_dim = 3 + 16 * 6 + (2) + 20
         self.query_init = nn.Linear(query_input_dim, self.feature_dim)
 
         # learnable positional encoding
@@ -185,10 +185,13 @@ class DeepMonocularModel(nn.Module):
      
         outputs = []
 
-        hist = torch.zeros(past.size(0), 19, 2, device=past.device)
-        for _ in range(20):
+        current = past[:, -1, 0:2].clone()
+        for i in range(20):
 
-            query_input = torch.cat([base_inputs, hist.view(past.size(0), -1)], dim=1)
+            time_onehot = F.one_hot(torch.tensor(i), num_classes=20).float().expand(past.size(0), -1).to(past.device)
+            current_flat = current.reshape(past.size(0), -1)
+
+            query_input = torch.cat([base_inputs, current_flat, time_onehot], dim=1)
             
             query = self.query_init(query_input).unsqueeze(1)
             
@@ -198,6 +201,5 @@ class DeepMonocularModel(nn.Module):
             step_output = self.decoder(query.squeeze(1))
             outputs.append(step_output)
             
-            hist = torch.cat([hist[:, 1:], step_output.unsqueeze(1)], dim=1) 
 
         return torch.stack(outputs, dim=1)
