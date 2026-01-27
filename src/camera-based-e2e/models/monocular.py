@@ -133,14 +133,14 @@ class MonocularModel(nn.Module):
         return self.decoder(attention.squeeze(1))  # (B, 40)
 
 class DeepMonocularModel(nn.Module):
-    def __init__(self, feature_extractor, out_dim, n_layers=1):
+    def __init__(self, feature_extractor, out_dim=2, n_layers=1):
         super().__init__()
         self.features = feature_extractor
         self.features.eval()
         self.feature_dim = sum(self.features.dims)
         
         # Initial Query Projection (Intent + Past -> C)
-        query_input_dim = 3 + 16 * 6
+        query_input_dim = 3 + 16 * 6 + (2 * 19)
         self.query_init = nn.Linear(query_input_dim, self.feature_dim)
 
         # learnable positional encoding
@@ -156,7 +156,7 @@ class DeepMonocularModel(nn.Module):
         self.decoder = nn.Sequential(
             nn.Linear(self.feature_dim, self.feature_dim),
             nn.GELU(),
-            nn.Linear(self.feature_dim, out_dim),
+            nn.Linear(self.feature_dim, 2),
         )
 
     def forward(self, x):
@@ -166,8 +166,10 @@ class DeepMonocularModel(nn.Module):
         
         # Ref: https://github.com/waymo-research/waymo-open-dataset/blob/5f8a1cd42491210e7de629b6f8fc09b65e0cbe99/src/waymo_open_dataset/dataset.proto#L50%20%20order%20=%20[2,%201,%203]
         front_cam = images[1]
+
         with torch.no_grad():
             feats = self.features(front_cam)  # list or tensor
+        
 
         # tokens: handle list of features or single tensor
         if isinstance(feats, (list, tuple)):
@@ -177,11 +179,25 @@ class DeepMonocularModel(nn.Module):
         tokens = torch.permute(tokens, (0, 2, 1)) + self.positional_encoding # (B, N, C_total)
         
         # copy procedure to build query_0 from MonocularModel
-        intent_onehot = F.one_hot((intent - 1).long(), num_classes=3).float()
+        intent_onehot = F.one_hot((intent - 1).long().clamp(0, 2), num_classes=3).float()
         past_flat = past.view(past.size(0), -1)
-        query = self.query_init(torch.cat([intent_onehot, past_flat], dim=1)).unsqueeze(1)
+        base_inputs = torch.cat([intent_onehot, past_flat], dim=1)
+     
+        outputs = []
 
-        for block in self.blocks:
-            query = block(query, tokens)
+        hist = torch.zeros(past.size(0), 19, 2, device=past.device)
+        for _ in range(20):
 
-        return self.decoder(query.squeeze(1))
+            query_input = torch.cat([base_inputs, hist.view(past.size(0), -1)], dim=1)
+            
+            query = self.query_init(query_input).unsqueeze(1)
+            
+            for block in self.blocks:
+                query = block(query, tokens)
+
+            step_output = self.decoder(query.squeeze(1))
+            outputs.append(step_output)
+            
+            hist = torch.cat([hist[:, 1:], step_output.unsqueeze(1)], dim=1) 
+
+        return torch.stack(outputs, dim=1)
