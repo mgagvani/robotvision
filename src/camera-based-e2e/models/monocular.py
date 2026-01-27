@@ -7,28 +7,36 @@ import pytorch_lightning as pl
 import timm
 from math import sqrt
 
-from .base_model import BaseModel, LitModel
+from .base_model import LitModel
 from .blocks import TransformerBlock
 
 class DINOFeatures(nn.Module):
-    def __init__(self, model_name: str = "vit_small_plus_patch16_dinov3.lvd1689m", frozen: bool = True):
+    def __init__(self, model_name: str = "vit_tiny_plus_patch16_dinov3.lvd1689m", frozen: bool = True):
         super(DINOFeatures, self).__init__()
 
+        # load in dino classification model
+        # features_only returns a list of layer outputs
         self.dino_model = timm.create_model(model_name, pretrained=True, features_only=True)
+
+        #sets up input preprocessing transforms
         self.data_config = timm.data.resolve_data_config(model=self.dino_model)
         self.transforms = timm.data.create_transform(**self.data_config, is_training=False)
+
+        # freezes the weights and doesn't continue training the model
         if frozen:
             for param in self.dino_model.parameters():
                 param.requires_grad = False
 
-        self.dims = [384, 384, 384]  # feature dims for each layer
+        self.dims = [384, 384, 384]  # feature the number of channels/features extracted at each layer
+        # intermediate layer outputs are also returned and useful
+
         self.patch_size = 16  # patch size
 
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
         # x: (B, 3, H, W)
         # transforms: resize 256x256, center crop, normalize
-        x_t = self.transforms(x.float()) # preprocess
-        features = self.dino_model(x_t)
+        x_t = self.transforms(x.float()) # preprocess input
+        features = self.dino_model(x_t) # 3 layers all with 384 channels/features and 16x16 patches
         return features # 3 x [B, 384, 16, 16]
     
 class SAMFeatures(nn.Module):
@@ -49,12 +57,13 @@ class SAMFeatures(nn.Module):
                 param.requires_grad = False
 
         channels = self.sam_model.feature_info.channels()
-        reductions = self.sam_model.feature_info.reduction()
-        self.feature_stage = feature_stage
-        self.dims = [channels[feature_stage]]
-        self.patch_size = reductions[feature_stage]  # effective stride
+        reductions = self.sam_model.feature_info.reduction() #input is shrunk by cumulative factor of reductions (array) at each stage
 
-    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+        self.feature_stage = feature_stage # chooses which feature stage to output (-1 = last)
+        self.dims = [channels[feature_stage]]
+        self.patch_size = reductions[feature_stage]  # sets patch size to reduction at that stage
+
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]: 
         # x: (B, 3, H, W)
         x_t = self.transforms(x.float())  # preprocess
         feats = self.sam_model(x_t)       # list of feature maps
@@ -73,14 +82,17 @@ class MonocularModel(nn.Module):
 
         # attention 
         self.feature_dim = sum(self.features.dims)  # works for both DINO and SAM
+
+        #converts tokens into key, value spaces
         self.key_projection = nn.Linear(in_features=self.feature_dim, out_features=self.feature_dim) # project into "key" space
         self.value_projection = nn.Linear(in_features=self.feature_dim, out_features=self.feature_dim)
 
         # condition the query on intent (B,) and past (B, 16, 6)
-        query_input_dim = 3 + 16 * 6  # one hot -- concat -- flattened
+        query_input_dim = 3 + 16 * 6 + 21 * 2  # one hot -- concat -- flattened
         self.query = nn.Sequential(
             nn.Linear(query_input_dim, self.feature_dim),
             nn.LeakyReLU(),
+            nn.Dropout(p=0.1),
             nn.Linear(self.feature_dim, self.feature_dim),
         )
 
@@ -92,6 +104,7 @@ class MonocularModel(nn.Module):
         self.decoder = nn.Sequential(
             nn.Linear(self.feature_dim, self.feature_dim),
             nn.LeakyReLU(),
+            nn.Dropout(p=0.1),
             nn.Linear(self.feature_dim, out_dim),
         )
 
@@ -104,6 +117,8 @@ class MonocularModel(nn.Module):
     def forward(self, x: dict) -> torch.Tensor:
         # past: (B, 16, 6), intent: int
         past, images, intent = x['PAST'], x['IMAGES'], x['INTENT']
+
+        pref_traj = x['PREF_TRAJ']  
         
         # Ref: https://github.com/waymo-research/waymo-open-dataset/blob/5f8a1cd42491210e7de629b6f8fc09b65e0cbe99/src/waymo_open_dataset/dataset.proto#L50%20%20order%20=%20[2,%201,%203]
         front_cam = images[1]
@@ -124,7 +139,9 @@ class MonocularModel(nn.Module):
 
         intent_onehot = F.one_hot((intent - 1).long(), num_classes=3).float()  # (B, 3). minus 1 --> 0, 1, 2
         past_flat = past.view(past.size(0), -1)  # (B, 96)
-        query = self.query(torch.cat([intent_onehot, past_flat], dim=1)).unsqueeze(1)  # (B, 1, 256)
+        pref_traj_flat = pref_traj.view(pref_traj.size(0), -1)  # (B, 42)
+        #print(pref_traj_flat.shape)
+        query = self.query(torch.cat([intent_onehot, past_flat, pref_traj_flat], dim=1)).unsqueeze(1)  
         query = self.query_norm(query)
 
         scores = query @ key.permute((0, 2, 1)) # (B, T, N)
@@ -140,7 +157,7 @@ class DeepMonocularModel(nn.Module):
         self.feature_dim = sum(self.features.dims)
         
         # Initial Query Projection (Intent + Past -> C)
-        query_input_dim = 3 + 16 * 6
+        query_input_dim = 3 + 16 * 6 + 21 * 2
         self.query_init = nn.Linear(query_input_dim, self.feature_dim)
 
         # learnable positional encoding
@@ -163,6 +180,7 @@ class DeepMonocularModel(nn.Module):
         # Copied from MonocularModel
         # past: (B, 16, 6), intent: int
         past, images, intent = x['PAST'], x['IMAGES'], x['INTENT']
+        pref_traj = x['PREF_TRAJ']
         
         # Ref: https://github.com/waymo-research/waymo-open-dataset/blob/5f8a1cd42491210e7de629b6f8fc09b65e0cbe99/src/waymo_open_dataset/dataset.proto#L50%20%20order%20=%20[2,%201,%203]
         front_cam = images[1]
@@ -179,7 +197,8 @@ class DeepMonocularModel(nn.Module):
         # copy procedure to build query_0 from MonocularModel
         intent_onehot = F.one_hot((intent - 1).long(), num_classes=3).float()
         past_flat = past.view(past.size(0), -1)
-        query = self.query_init(torch.cat([intent_onehot, past_flat], dim=1)).unsqueeze(1)
+        pref_traj_flat = pref_traj.view(pref_traj.size(0), -1)  # (B, 42)
+        query = self.query_init(torch.cat([intent_onehot, past_flat, pref_traj_flat], dim=1)).unsqueeze(1)
 
         for block in self.blocks:
             query = block(query, tokens)

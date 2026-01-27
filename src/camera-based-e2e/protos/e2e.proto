@@ -55,7 +55,7 @@ message E2EDFrame {
   // assigned rater scores of -1 or left empty. Valid scores range from [0, 10].
   repeated EgoTrajectoryStates preference_trajectories = 8;
 
-
+  // Numbers here are field numbers (1,5,6,7,8)
 }
 
 message EgoTrajectoryStates {
