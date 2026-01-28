@@ -44,10 +44,10 @@ class WaymoE2E(IterableDataset):
         gpu_tensors_list = torchvision.io.decode_jpeg(
             img_tensor, 
             mode=torchvision.io.ImageReadMode.UNCHANGED,
-            device= 'cuda' #['cuda:0', 'cuda:1'][torch.utils.data.get_worker_info().id%2]
+            device= 'cpu' #['cuda:0', 'cuda:1'][torch.utils.data.get_worker_info().id%2]
         )
         # img_array = np.frombuffer(img, np.uint8)
-        return gpu_tensors_list.cpu()
+        return gpu_tensors_list
     
     def __len__(self):
         return len(self.indexes)
@@ -90,7 +90,7 @@ class WaymoE2E(IterableDataset):
             future = np.array(future, dtype=np.float32)
 
 
-            yield {'PAST': past, 'FUTURE': future, 'IMAGES': [self.decode_img(images.image) for images in frame.frame.images], 'INTENT': frame.intent}
+            yield {'PAST': past, 'FUTURE': future, 'IMAGES': [self.decode_img(images.image) for images in frame.frame.images], 'INTENT': frame.intent, 'NAME': frame.frame.context.name}
 
 if __name__ == "__main__":
 

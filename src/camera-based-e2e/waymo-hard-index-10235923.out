@@ -1,0 +1,4 @@
+Requested top_k=25000
+Found tuples: 25000
+Missing names: 0
+Wrote hard index: index_train_hard_25k.pkl

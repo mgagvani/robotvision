@@ -1,0 +1,22 @@
+/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pytorch_lightning/utilities/parsing.py:210: Attribute 'model' is an instance of `nn.Module` and is already saved during checkpointing. It is recommended to ignore them using `self.save_hyperparameters(ignore=['model'])`.
+Using bfloat16 Automatic Mixed Precision (AMP)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pytorch_lightning/callbacks/model_checkpoint.py:881: Checkpoint directory /scratch/gilbreth/shar1159/checkpoints exists and is not empty.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pytorch_lightning/utilities/model_summary/model_summary.py:242: Precision bf16-mixed is not supported by the model summary.  Estimated model size in MB will not be accurate. Using 32 bits instead.
+
+  | Name  | Type     | Params | Mode  | FLOPs
+---------------------------------------------------
+0 | model | NewModel | 28.1 M | train | 0    
+---------------------------------------------------
+1.3 M     Trainable params
+26.8 M    Non-trainable params
+28.1 M    Total params
+112.541   Total estimated model params size (MB)
+244       Modules in train mode
+0         Modules in eval mode
+0         Total Flops
+srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
+slurmstepd: error: *** STEP 10227981.0 ON gilbreth-e014 CANCELLED AT 2026-01-26T14:09:34 ***
+slurmstepd: error: *** JOB 10227981 ON gilbreth-e014 CANCELLED AT 2026-01-26T14:09:34 ***

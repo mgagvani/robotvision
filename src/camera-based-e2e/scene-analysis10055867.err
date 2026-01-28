@@ -1,0 +1,11 @@
+Traceback (most recent call last):
+  File "/scratch/gilbreth/shar1159/robotvision/src/camera-based-e2e/scene_analysis.py", line 89, in <module>
+    X = df[["mean_speed", "speed_var", "mean_accel", "curvature"]].values
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pandas/core/frame.py", line 4119, in __getitem__
+    indexer = self.columns._get_indexer_strict(key, "columns")[1]
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pandas/core/indexes/base.py", line 6212, in _get_indexer_strict
+    self._raise_if_missing(keyarr, indexer, axis_name)
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pandas/core/indexes/base.py", line 6264, in _raise_if_missing
+    raise KeyError(f"{not_found} not in index")
+KeyError: "['mean_accel'] not in index"
+srun: error: gilbreth-h005: task 0: Exited with exit code 1
