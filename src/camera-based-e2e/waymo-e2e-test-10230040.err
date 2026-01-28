@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "/scratch/gilbreth/shar1159/robotvision/src/camera-based-e2e/testing.py", line 9, in <module>
+    batch_size=args.batch_size,
+NameError: name 'args' is not defined
+srun: error: gilbreth-f000: task 0: Exited with exit code 1

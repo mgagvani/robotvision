@@ -1,5 +1,6 @@
-import argparse 
+import argparse
 from datetime import datetime
+from pytorch_lightning.callbacks import TQDMProgressBar
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -9,8 +10,6 @@ from matplotlib import pyplot as plt
 import pandas as pd
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from pathlib import Path
 
 from loader import WaymoE2E
@@ -31,56 +30,75 @@ if __name__ == "__main__":
     train_dataset = WaymoE2E(batch_size=args.batch_size, indexFile='index_train.pkl', data_dir=args.data_dir, images=True, n_items=250000)
     test_dataset = WaymoE2E(batch_size=args.batch_size, indexFile='index_val.pkl', data_dir=args.data_dir, images=True, n_items=50000)
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=12, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
-    val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=12, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
+    all_intents = []
+    for batch in train_loader:
+        all_intents.append(batch["INTENT"])
+    all_intents = torch.cat(all_intents)
+    print("ALL UNIQUE INTENT VALUES:", all_intents.unique())
+
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        num_workers=4,
+        collate_fn=collate_with_images,
+        persistent_workers=False,
+        pin_memory=False,
+    )
 
     # Model
-    in_dim = 16 * 6  # Past: (B, 16, 6)
+    in_dim = 16 * 6   # Past: (B, 16, 6)
     out_dim = 20 * 2  # Future: (B, 20, 2)
 
     model = DeepMonocularModel(feature_extractor=SAMFeatures(model_name="timm/vit_pe_spatial_tiny_patch16_512.fb"), out_dim=out_dim)
     lit_model = LitModel(model=torch.compile(model, mode="max-autotune"), lr=args.lr)
 
     base_path = Path(args.data_dir).parent.as_posix()
-    # We don't want to save logs or checkpoints in the home directory - it'll fill up fast
+
     trainer = pl.Trainer(
         max_epochs=args.max_epochs,
         logger=CSVLogger(base_path + "/logs", name=f"camera_e2e_{datetime.now().strftime('%Y%m%d_%H%M')}"),
         precision="bf16-mixed",
         callbacks=[
-            ModelCheckpoint(monitor='val_loss',
-                             mode='min', 
-                             save_top_k=1, 
-                             dirpath=base_path + '/checkpoints',
-                             filename='camera-e2e-{epoch:02d}-{val_loss:.2f}'
-                            ),
+            TQDMProgressBar(refresh_rate=1),
+            ModelCheckpoint(
+                monitor="val_loss",
+                mode="min",
+                save_top_k=1,
+                dirpath=base_path + "/checkpoints",
+                filename="camera-e2e-{epoch:02d}-{val_loss:.2f}",
+            ),
         ],
     )
 
     trainer.fit(lit_model, train_loader, val_loader)
 
-    # Export loss graph to visualizations/
-    try:
-        base_path = Path(base_path)
-        run_dir = sorted((base_path / "logs").glob("camera_e2e_*"))[-1]  # newest run
-        metrics = pd.read_csv(run_dir / "version_0" / "metrics.csv")
-        train = metrics[metrics["train_loss"].notna()]
-        val = metrics[metrics["val_loss"].notna()]
+    # # Export loss graph to visualizations/
+    # try:
+    #     base_path = Path(base_path)
+    #     run_dir = sorted((base_path / "logs").glob("camera_e2e_*"))[-1]  # newest run
+    #     metrics = pd.read_csv(run_dir / "version_0" / "metrics.csv")
+    #     train = metrics[metrics["train_loss"].notna()]
+    #     val = metrics[metrics["val_loss"].notna()]
 
-        plt.figure()
-        plt.plot(train["step"], train["train_loss"], label="train_loss")
-        plt.plot(val["step"], val["val_loss"], label="val_loss")
-        plt.xlabel("Step")
-        plt.ylabel("Loss")
-        plt.legend()
-        plt.tight_layout()
-        out = Path("./visualizations")
-        plt.savefig(out / "loss.png", dpi=200)
-    except Exception as e:
-        print(f"Could not save loss plot: {e}")
+    #     plt.figure()
+    #     plt.plot(train["step"], train["train_loss"], label="train_loss")
+    #     plt.plot(val["step"], val["val_loss"], label="val_loss")
+    #     plt.xlabel("Step")
+    #     plt.ylabel("Loss")
+    #     plt.legend()
+    #     plt.tight_layout()
+    #     out = Path("./visualizations")
+    #     plt.savefig(out / "loss.png", dpi=200)
+    # except Exception as e:
+    #     print(f"Could not save loss plot: {e}")
 
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset,
+        batch_size=args.batch_size,
+        num_workers=4,
+        collate_fn=collate_with_images,
+        persistent_workers=False,
+        pin_memory=False,
+    )
 
-
-
-
-    
+    trainer.test(lit_model, dataloaders=test_loader)

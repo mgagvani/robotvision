@@ -33,8 +33,6 @@ class WaymoE2E(IterableDataset):
         self.file = None
 
         with open(indexFile, 'rb') as f:
-            # NOTE: test does not have reference trajectories
-            # We train on train and validate on val set
             self.indexes = pickle.load(f)
 
         # TODO: Determine how to sample specific subsets of the data that we care about.
@@ -103,8 +101,9 @@ if __name__ == "__main__":
     from torch.utils.data import DataLoader
     import time
     from tqdm import tqdm
-    # NOTE: Replace with your path
-    DATA_DIR = '/scratch/gilbreth/mgagvani/wod/waymo_open_dataset_end_to_end_camera_v_1_0_0/'
+    DATA_DIR = '/scratch/gilbreth/shar1159/waymo_open_dataset_end_to_end_camera_v_1_0_0/'
+    # DATA_DIR = './data'
+    # DATA_DIR = '/tmp/'
     BATCH_SIZE = 32
     dataset = WaymoE2E(indexFile="index_train.pkl", data_dir = DATA_DIR, images=True)
     loader = DataLoader(
