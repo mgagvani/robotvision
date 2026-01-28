@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import IterableDataset
-from waymo_open_dataset.protos import end_to_end_driving_data_pb2 as e2e_pb2
+from protos import e2e_pb2
 import torchvision
 import pickle
 import struct

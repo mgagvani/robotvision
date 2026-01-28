@@ -18,6 +18,7 @@ from loader import WaymoE2E
 # Replace with your model defined in models/ 
 from models.base_model import LitModel, collate_with_images
 from models.monocular import MonocularModel, DeepMonocularModel, SAMFeatures
+from models.vlm_waypoint_model import VLMWaypointModel
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -28,8 +29,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Data 
-    train_dataset = WaymoE2E(batch_size=args.batch_size, indexFile='index_train.pkl', data_dir=args.data_dir, images=True, n_items=250000)
-    test_dataset = WaymoE2E(batch_size=args.batch_size, indexFile='index_val.pkl', data_dir=args.data_dir, images=True, n_items=50000)
+    train_dataset = WaymoE2E(indexFile='index_train.pkl', data_dir=args.data_dir, images=True, n_items=250000, seed=42)
+    test_dataset = WaymoE2E(indexFile='index_val.pkl', data_dir=args.data_dir, images=True, n_items=50000, seed=42)
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=12, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
     val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=12, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
@@ -38,8 +39,10 @@ if __name__ == "__main__":
     in_dim = 16 * 6  # Past: (B, 16, 6)
     out_dim = 20 * 2  # Future: (B, 20, 2)
 
-    model = DeepMonocularModel(feature_extractor=SAMFeatures(model_name="timm/vit_pe_spatial_tiny_patch16_512.fb"), out_dim=out_dim)
-    lit_model = LitModel(model=torch.compile(model, mode="max-autotune"), lr=args.lr)
+    # VLM-based model (frozen VLM + trainable head)
+    model = VLMWaypointModel(in_dim=in_dim, out_dim=out_dim, hidden_dim=512)
+    # Don't use torch.compile initially to avoid issues with frozen models
+    lit_model = LitModel(model=model, lr=args.lr)
 
     base_path = Path(args.data_dir).parent.as_posix()
     # We don't want to save logs or checkpoints in the home directory - it'll fill up fast
