@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import IterableDataset
-from protos import e2e_pb2
+from waymo_open_dataset.protos import end_to_end_driving_data_pb2 as e2e_pb2
 import torchvision
 import pickle
 import struct
@@ -17,10 +17,17 @@ devices = ['cuda:0', 'cuda:1']
 random.seed(42) # Deterministic
 
 class WaymoE2E(IterableDataset): 
-    def __init__(self, batch_size, indexFile = 'index.pkl', data_dir='./dataset', images = True, n_items: Optional[int] = None):
+    def __init__(
+        self,
+        indexFile = 'index.pkl',
+        data_dir='./dataset',
+        images = True,
+        n_items: Optional[int] = None,
+        seed: Optional[int] = None,
+    ):
         self.images = images
         self.data_dir = data_dir
-        self.batch_size = batch_size
+        self.seed = seed
 
         self.filename = ""
         self.file = None
@@ -28,13 +35,15 @@ class WaymoE2E(IterableDataset):
         with open(indexFile, 'rb') as f:
             self.indexes = pickle.load(f)
 
-        # TODO: Handle train, test, and validation splits properly (will we need unique index files?)
-        # - Create a better solution for taking subsets of the data
-        # - Eventually, determine how to sample specific subsets of the data that we care about.
-        if n_items is not None:
-            # Limit to n_items. Shuffle so each subset is random
-            random.shuffle(self.indexes)
-            self.indexes = self.indexes[:n_items]
+        # TODO: Determine how to sample specific subsets of the data that we care about.
+        if n_items is not None and n_items < len(self.indexes):
+            total = len(self.indexes)
+            # pick a deterministic contiguous block when a seed is provided
+            rng = random.Random(seed) if seed is not None else random
+            start = rng.randint(0, total - n_items)
+            self.indexes = self.indexes[start : start + n_items]
+
+
 
     def decode_img(self, img):
         if not self.images:
@@ -54,22 +63,15 @@ class WaymoE2E(IterableDataset):
     
     def __iter__(self):
         worker = torch.utils.data.get_worker_info()
-        if worker is not None:
-            id, num_workers = worker.id, worker.num_workers
-            local_indexes = []
-            batch_id = 0
-            for i in range(0, len(self.indexes), self.batch_size):
-                if batch_id % num_workers == id:
-                    local_indexes.extend(list(range(i,  min(len(self.indexes), i + self.batch_size))))
-                
-                batch_id += 1
+        if worker is None:
+            start, step = 0, 1
         else:
-            local_indexes = list(range(len(self.indexes)))    
+            start, step = worker.id, worker.num_workers
 
-
-        for idx in local_indexes:
-            frame = e2e_pb2.E2EDFrame() # type: ignore
+        for idx in range(start, len(self.indexes), step):
+            frame = e2e_pb2.E2EDFrame()  # type: ignore
             filename, start_byte, byte_length = self.indexes[idx]
+
             if self.filename != filename:
                 if self.file:
                     self.file.close()
@@ -89,8 +91,10 @@ class WaymoE2E(IterableDataset):
             past = np.array(past, dtype=np.float32) # ensure consistent dtype
             future = np.array(future, dtype=np.float32)
 
+            # For submission to waymo evaluation server
+            name = frame.frame.context.name
 
-            yield {'PAST': past, 'FUTURE': future, 'IMAGES': [self.decode_img(images.image) for images in frame.frame.images], 'INTENT': frame.intent}
+            yield {'PAST': past, 'FUTURE': future, 'IMAGES': [self.decode_img(images.image) for images in frame.frame.images], 'INTENT': frame.intent, 'NAME': name}
 
 if __name__ == "__main__":
 
@@ -101,7 +105,7 @@ if __name__ == "__main__":
     # DATA_DIR = './data'
     # DATA_DIR = '/tmp/'
     BATCH_SIZE = 32
-    dataset = WaymoE2E(BATCH_SIZE, data_dir = DATA_DIR, images=False)
+    dataset = WaymoE2E(indexFile="index_train.pkl", data_dir = DATA_DIR, images=True)
     loader = DataLoader(
         dataset, 
         batch_size=BATCH_SIZE,
@@ -111,7 +115,8 @@ if __name__ == "__main__":
     def main():
         # start = time.time()
         for batch_of_frames in tqdm(loader):
-            print(batch_of_frames.keys(), [b.shape for b in batch_of_frames.values() if isinstance(b, torch.Tensor)])
+            # print(batch_of_frames["INTENT"])
+            # print(batch_of_frames.keys(), [b.shape for b in batch_of_frames.values() if isinstance(b, torch.Tensor)])
             pass
         # print("Total Time:", time.time()-start)
     
