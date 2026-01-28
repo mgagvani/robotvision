@@ -1,0 +1,70 @@
+from typing import List, Optional
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import pytorch_lightning as pl
+import timm
+from math import sqrt
+
+class MHA(nn.Module):
+    def __init__(self, embed_dim, num_heads):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.scale = sqrt(self.head_dim)
+
+        # Projections
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        self.o_proj = nn.Linear(embed_dim, embed_dim)
+
+    def forward(self, x: torch.Tensor, context: Optional[torch.Tensor] = None) -> torch.Tensor:
+        B, N, C = x.shape
+        context = context if context is not None else x
+        M = context.shape[1] # Number of context tokens
+
+        # Project and split into heads: (B, N, C) -> (B, N, H, D) -> (B, H, N, D)
+        q = self.q_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(context).view(B, M, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(context).view(B, M, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # (B, H, N, D) @ (B, H, D, M) -> (B, H, N, M)
+        attn = (q @ k.transpose(-2, -1)) / self.scale
+        attn = F.softmax(attn, dim=-1)
+
+        # Combine (B, H, N, M) @ (B, H, M, D) -> (B, H, N, D)
+        out = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        return self.o_proj(out)
+
+class TransformerBlock(nn.Module):
+    '''
+    Combined self (query <-> query) and cross (query <-> tokens) attention block 
+    '''
+    def __init__(self, embed_dim, num_heads, mlp_dim):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(embed_dim)
+        self.self_attn = MHA(embed_dim, num_heads)
+        
+        self.ln2 = nn.LayerNorm(embed_dim)
+        self.cross_attn = MHA(embed_dim, num_heads)
+        
+        self.ln3 = nn.LayerNorm(embed_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(embed_dim, mlp_dim),
+            nn.GELU(),
+            nn.Linear(mlp_dim, embed_dim)
+        )
+
+    def forward(self, query: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
+        # self attention
+        query = query + self.self_attn(self.ln1(query))
+        
+        # cross attention (Query <-> Tokens)
+        # Note: tokens do not get updated here
+        query = query + self.cross_attn(self.ln2(query), context=tokens)
+        
+        # 3. feed forward to next block (MLP)
+        query = query + self.mlp(self.ln3(query))
+        return query

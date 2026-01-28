@@ -14,52 +14,21 @@ from pathlib import Path
 
 from loader import WaymoE2E
 
-# Replace with your model defined in models/
-from models.shrey_model import NewModel, LitModel
-from models.base_model import collate_with_images
-
-
+# Replace with your model defined in models/ 
+from models.base_model import LitModel, collate_with_images
+from models.monocular import MonocularModel, DeepMonocularModel, SAMFeatures
+    
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, required=True, help="Path to Waymo E2E data directory")
-    parser.add_argument("--batch_size", type=int, default=16, help="Batch size for training")
-    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
-    parser.add_argument("--max_epochs", type=int, default=10, help="Number of epochs to train")
-    parser.add_argument("--train_index", type=str, default="index_train.pkl",
-                    help="Train index .pkl (default: index_train.pkl)")
+    parser.add_argument('--data_dir', type=str, required=True, help='Path to Waymo E2E data directory')
+    parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--max_epochs', type=int, default=10, help='Number of epochs to train')
     args = parser.parse_args()
 
-    # Data
-    train_dataset = WaymoE2E(
-        batch_size=args.batch_size,
-        indexFile=args.train_index,
-        data_dir=args.data_dir,
-        images=True,
-        n_items=25000,
-    )
-    val_dataset = WaymoE2E(
-        batch_size=args.batch_size,
-        indexFile="index_val.pkl",
-        data_dir=args.data_dir,
-        images=True,
-        n_items=5000
-    )
-
-    test_dataset = WaymoE2E(
-        batch_size=args.batch_size,
-        indexFile="index_test.pkl",
-        data_dir=args.data_dir,
-        images=True,
-    )
-
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        num_workers=4,
-        collate_fn=collate_with_images,
-        persistent_workers=False,
-        pin_memory=False,
-    )
+    # Data 
+    train_dataset = WaymoE2E(batch_size=args.batch_size, indexFile='index_train.pkl', data_dir=args.data_dir, images=True, n_items=250000)
+    test_dataset = WaymoE2E(batch_size=args.batch_size, indexFile='index_val.pkl', data_dir=args.data_dir, images=True, n_items=50000)
 
     all_intents = []
     for batch in train_loader:
@@ -80,8 +49,8 @@ if __name__ == "__main__":
     in_dim = 16 * 6   # Past: (B, 16, 6)
     out_dim = 20 * 2  # Future: (B, 20, 2)
 
-    model = NewModel(in_dim=in_dim, out_dim=out_dim)
-    lit_model = LitModel(model=model, lr=args.lr, test_out_path="test_metrics_hard.json")
+    model = DeepMonocularModel(feature_extractor=SAMFeatures(model_name="timm/vit_pe_spatial_tiny_patch16_512.fb"), out_dim=out_dim)
+    lit_model = LitModel(model=torch.compile(model, mode="max-autotune"), lr=args.lr)
 
     base_path = Path(args.data_dir).parent.as_posix()
 
