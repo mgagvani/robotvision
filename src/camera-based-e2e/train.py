@@ -5,16 +5,6 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger
 
-from matplotlib import pyplot as plt
-import pandas as pd
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from pathlib import Path
-
-from loader import WaymoE2E
-
 # Replace with your model defined in models/ 
 from models.base_model import LitModel, collate_with_images
 from models.monocular import MonocularModel, DeepMonocularModel, SAMFeatures
@@ -31,8 +21,17 @@ if __name__ == "__main__":
     train_dataset = WaymoE2E(batch_size=args.batch_size, indexFile='index_train.pkl', data_dir=args.data_dir, images=True, n_items=250000)
     test_dataset = WaymoE2E(batch_size=args.batch_size, indexFile='index_val.pkl', data_dir=args.data_dir, images=True, n_items=50000)
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=12, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
-    val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=12, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
+    with open("train_index.pkl", "wb") as f1:
+        pickle.dump(train_index, f1)
+
+    with open("test_index.pkl", "wb") as f2:
+        pickle.dump(test_index, f2)
+    
+    train_dataset = WaymoE2E(batch_size=args.batch_size, indexFile='train_index.pkl', data_dir=args.data_dir, images=False)
+    test_dataset = WaymoE2E(batch_size=args.batch_size, indexFile='test_index.pkl', data_dir=args.data_dir, images=False)
+    
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=16)
+    val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=16)
 
     # Model
     in_dim = 16 * 6  # Past: (B, 16, 6)
@@ -59,7 +58,6 @@ if __name__ == "__main__":
 
     trainer.fit(lit_model, train_loader, val_loader)
 
-    # Export loss graph to visualizations/
     try:
         base_path = Path(base_path)
         run_dir = sorted((base_path / "logs").glob("camera_e2e_*"))[-1]  # newest run
@@ -79,8 +77,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Could not save loss plot: {e}")
 
-
-
-
-
-    
