@@ -133,7 +133,7 @@ class MonocularModel(nn.Module):
         return self.decoder(attention.squeeze(1))  # (B, 40)
 
 class DeepMonocularModel(nn.Module):
-    def __init__(self, feature_extractor, out_dim, n_layers=1):
+    def __init__(self, feature_extractor, out_dim, n_blocks=1):
         super().__init__()
         self.features = feature_extractor
         self.features.eval()
@@ -150,7 +150,7 @@ class DeepMonocularModel(nn.Module):
         # Deep network rather than single attention in MonocularModel 
         self.blocks = nn.ModuleList([
             TransformerBlock(self.feature_dim, num_heads=8, mlp_dim=self.feature_dim*4)
-            for _ in range(n_layers)
+            for _ in range(n_blocks)
         ])
         
         self.decoder = nn.Sequential(
