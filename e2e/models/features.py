@@ -19,7 +19,6 @@ class VitFeatures(nn.Module):
         )
 
         self.data_config = timm.data.resolve_data_config(model=self.vit)
-        # self.transforms = timm.data.create_transform(**self.data_config, is_training=False)
 
         self.mean = torch.tensor(self.data_config['mean']).view(1, 3, 1, 1)
         self.std = torch.tensor(self.data_config['std']).view(1, 3, 1, 1)
@@ -40,39 +39,11 @@ class VitFeatures(nn.Module):
                 param.requires_grad = False        
 
     def forward(self, x: torch.Tensor):
-        # x: (B, 3, H, W)
-        # x = x.float() / 255.0  # timm transforms expect inputs in [0, 1]
-        # x = x.clamp(0.0, 1.0)
-        # x_t = self.transforms(x)
-
-        # Resize and normalize manually since transforms expect CPU tensors.
-
-        if torch.isnan(x).any():
-            raise ValueError("NaN detected in image input")
 
         x = x.float() / 255.0
-
-        if torch.isnan(x).any():
-            raise ValueError("NaN detected in image input after scaling")
-        elif torch.isinf(x).any():
-            raise ValueError("Inf detected in image input after scaling")
-
         x = F.interpolate(x, size=self.input_size, mode='bilinear', align_corners=False)
-
-        if torch.isnan(x).any():
-            raise ValueError("NaN detected in image input after resizing")
-        elif torch.isinf(x).any():
-            raise ValueError("Inf detected in image input after resizing")
-
         x = (x - self.mean.to(x.device)) / self.std.to(x.device)
-        if torch.isnan(x).any():
-            raise ValueError("NaN detected in image input after normalization")
-        elif torch.isinf(x).any():
-            raise ValueError("Inf detected in image input after normalization")
 
         feats = self.vit(x)
-
-        if torch.isnan(feats[self.feature_stage]).any():
-            raise ValueError("NaN detected in extracted features")
 
         return [feats[self.feature_stage]]

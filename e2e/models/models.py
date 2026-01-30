@@ -79,12 +79,6 @@ class LitModel(pl.LightningModule):
         images = batch['images']
         intent = batch['intent']
 
-        if torch.isnan(future).any():
-            raise ValueError("NaN detected in future trajectory ground truth")
-        
-        if torch.isnan(past).any():
-            raise ValueError("NaN detected in past trajectory input")
-
         inputs = {
             'past': past,
             'images': images,
@@ -92,10 +86,6 @@ class LitModel(pl.LightningModule):
         }
 
         pred_future = self.forward(inputs)
-
-        if torch.isnan(pred_future).any():
-            raise ValueError("NaN detected in model predicted future trajectory")
-
         # loss = self.ade_loss(pred_future.view_as(future), future)
         loss = F.smooth_l1_loss(pred_future.view_as(future), future)
 
@@ -191,9 +181,6 @@ class MonocularModel(nn.Module):
         past_flat = past.view(past.size(0), -1)  # (B, 96)
         query = self.query(torch.cat([intent_onehot, past_flat], dim=1)).unsqueeze(1)  # (B, 1, feature_dim)
 
-        if torch.isnan(query).any():
-            raise ValueError("NaN detected in query tensor")
-
         if len(cam_tokens) == 0:
             # No cameras: skip attention entirely, rely on intent + past only.
             out = self.decoder(query.squeeze(1))
@@ -201,58 +188,25 @@ class MonocularModel(nn.Module):
 
         tokens = torch.cat(cam_tokens, dim=1)  # (B, cams * N, C)
 
-        if torch.isnan(tokens).any():
-            raise ValueError("NaN detected in image feature tokens")
-
         tokens = tokens + self.positional_encoding.to(tokens.device)
-
-        if torch.isnan(tokens).any():
-            raise ValueError("NaN detected after adding positional encoding to tokens")
         
         # Normalize tokens to reduce overflow risk in attention logits
         tokens = F.layer_norm(tokens, tokens.shape[-1:])
-
-        if torch.isnan(tokens).any():
-            raise ValueError("NaN detected after layer norm on tokens")
 
         # attention
         key = self.key_projection(tokens) # (B, N, C)
         value = self.value_projection(tokens) # (B, N, C)
 
-        if torch.isnan(key).any():
-            raise ValueError("NaN detected in key tensor")
-        
-        if torch.isnan(value).any():
-            raise ValueError("NaN detected in value tensor")
-
         # Normalize query and key to prevent NaN in attention scores with multiple cameras
         query = F.layer_norm(query, query.shape[-1:])
         key = F.layer_norm(key, key.shape[-1:])
 
-        if torch.isnan(query).any():
-            raise ValueError("NaN detected after layer norm on query")
-        
-        if torch.isnan(key).any():
-            raise ValueError("NaN detected after layer norm on key")
-
         scores = (query @ key.permute((0, 2, 1)))  # (B, 1, N)
-        if torch.isnan(scores).any():
-            raise ValueError("NaN detected in attention scores tensor")
         scores = scores / sqrt(key.shape[2])
-        if torch.isnan(scores).any():
-            raise ValueError("NaN detected after scaling attention scores tensor")
         scores = torch.clamp(scores, min=-100.0, max=100.0)
-        if torch.isnan(scores).any():
-            raise ValueError("NaN detected after clamping attention scores tensor")
         scores = scores - scores.max(dim=2, keepdim=True).values
-        if torch.isnan(scores).any():
-            raise ValueError("NaN detected after stabilizing attention scores tensor")
         attn = F.softmax(scores, dim=2)
-        if torch.isnan(attn).any():
-            raise ValueError("NaN detected in attention weights tensor")
         attention = attn @ value  # (B, 1, C)
-        if torch.isnan(attention).any():
-            raise ValueError("NaN detected in attention output tensor")
         out = self.decoder(attention.squeeze(1))  # (B, 40)
 
         return out
