@@ -37,14 +37,14 @@ class DepthLoss:
 
         return prediction
 
-    def compute_depth_loss(self, images, target_depths, loss_fn):
-        pred_depth = self.get_depth(images)
-        depth_loss = loss_fn(pred_depth, target_depths)
+    def compute_depth_loss(self, gt_images, pred_depths, loss_fn):
+        pred_depth = self.get_depth(gt_images)
+        depth_loss = loss_fn(pred_depth, pred_depths)
 
         return depth_loss
     
-    def __call__(self, images, target_depths, loss_fn=F.l1_loss):
-        return self.compute_depth_loss(images, target_depths, loss_fn)
+    def __call__(self, gt_images, pred_depths, loss_fn=F.l1_loss):
+        return self.compute_depth_loss(gt_images, pred_depths, loss_fn)
     
 
 if __name__ == "__main__":

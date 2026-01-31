@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 
+from .losses.depth_loss import DepthLoss
+
 class BaseModel(nn.Module):
     def __init__(self, in_dim, out_dim):
         super(BaseModel, self).__init__()
@@ -28,6 +30,10 @@ class LitModel(pl.LightningModule):
             'IMAGES': [torch.zeros((1, 3, 1280, 1920)) for _ in range(6)],  # IMAGES
             'INTENT': torch.tensor([1.0]),  # INTENT
         },)
+
+    def on_fit_start(self) -> None:
+        super().on_fit_start()
+        self.depth_loss = DepthLoss(self.device)
 
     # ---- Metrics ----
     def ade_loss(self, pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
@@ -56,14 +62,28 @@ class LitModel(pl.LightningModule):
         model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent}
 
         pred_future = self.forward(model_inputs)  # (B, T*2)
-        loss = self.ade_loss(pred_future.reshape_as(future), future)  # reshape to (B, T, 2
+        pred_depth = None
+        if isinstance(pred_future, dict):
+            pred_future, pred_depth = pred_future["waypoints"], pred_future.get("depth", None)
+
+        loss_ade = self.ade_loss(pred_future.reshape_as(future), future)  # reshape to (B, T, 2)
+
+        # Depth Loss
+        if pred_depth is not None:
+            front_img = images[1]  # front camera
+            depth_in = F.interpolate(front_img, size=(128, 128), mode='nearest')
+            loss_depth = self.depth_loss(depth_in, pred_depth, loss_fn=F.l1_loss)
+        else:
+            loss_depth = torch.tensor(0.0, device=self.device)
 
         # TODO: improve logging both to disk and to console
         self.log_dict({
-            f"{stage}_loss": loss,
+            f"{stage}_loss_ade": loss_ade,
+            f"{stage}_loss_depth": loss_depth,
+            f"{stage}_loss": loss_ade + loss_depth,
         }, prog_bar=True, logger=True)
 
-        return loss
+        return loss_ade + loss_depth
     
     def training_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, "train")

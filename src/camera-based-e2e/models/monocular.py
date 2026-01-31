@@ -1,64 +1,9 @@
-from typing import List, Optional
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import pytorch_lightning as pl
-import timm
 from math import sqrt
 
-from .base_model import BaseModel, LitModel
 from .blocks import TransformerBlock
-
-class DINOFeatures(nn.Module):
-    def __init__(self, model_name: str = "vit_small_plus_patch16_dinov3.lvd1689m", frozen: bool = True):
-        super(DINOFeatures, self).__init__()
-
-        self.dino_model = timm.create_model(model_name, pretrained=True, features_only=True)
-        self.data_config = timm.data.resolve_data_config(model=self.dino_model)
-        self.transforms = timm.data.create_transform(**self.data_config, is_training=False)
-        if frozen:
-            for param in self.dino_model.parameters():
-                param.requires_grad = False
-
-        self.dims = [384, 384, 384]  # feature dims for each layer
-        self.patch_size = 16  # patch size
-
-    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
-        # x: (B, 3, H, W)
-        # transforms: resize 256x256, center crop, normalize
-        x_t = self.transforms(x.float().div(255.0)) # preprocess
-        features = self.dino_model(x_t)
-        return features # 3 x [B, 384, 16, 16]
-    
-class SAMFeatures(nn.Module):
-    def __init__(
-        self,
-        model_name: str = "timm/sam2_hiera_tiny.fb_r896_2pt1",
-        frozen: bool = True,
-        feature_stage: int = -1,
-    ):
-        super(SAMFeatures, self).__init__()
-
-        # features_only returns a list of stage outputs
-        self.sam_model = timm.create_model(model_name, pretrained=True, features_only=True)
-        self.data_config = timm.data.resolve_data_config(model=self.sam_model)
-        self.transforms = timm.data.create_transform(**self.data_config, is_training=False)
-        if frozen:
-            for param in self.sam_model.parameters():
-                param.requires_grad = False
-
-        channels = self.sam_model.feature_info.channels()
-        reductions = self.sam_model.feature_info.reduction()
-        self.feature_stage = feature_stage
-        self.dims = [channels[feature_stage]]
-        self.patch_size = reductions[feature_stage]  # effective stride
-
-    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
-        # x: (B, 3, H, W)
-        x_t = self.transforms(x.float().div(255.0))  # preprocess
-        feats = self.sam_model(x_t)       # list of feature maps
-        return [feats[self.feature_stage]]
 
 class MonocularModel(nn.Module):
     def __init__(
@@ -136,12 +81,18 @@ class DeepMonocularModel(nn.Module):
     def __init__(self, feature_extractor, out_dim, n_blocks=1):
         super().__init__()
         self.features = feature_extractor
-        self.features.eval()
         self.feature_dim = sum(self.features.dims)
         
         # Initial Query Projection (Intent + Past -> C)
         query_input_dim = 3 + 16 * 6
         self.query_init = nn.Linear(query_input_dim, self.feature_dim)
+
+        # Instead of fine-tuning feature extractor, project w/ conv
+        self.visual_adapter = nn.Sequential(
+            nn.Conv2d(self.feature_dim, self.feature_dim, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(self.feature_dim, self.feature_dim, 3, padding=1),
+        )
 
         # learnable positional encoding
         self.n_tokens = self.features.data_config["input_size"][1] // self.features.patch_size * (self.features.data_config["input_size"][2] // self.features.patch_size)
@@ -152,6 +103,17 @@ class DeepMonocularModel(nn.Module):
             TransformerBlock(self.feature_dim, num_heads=8, mlp_dim=self.feature_dim*4)
             for _ in range(n_blocks)
         ])
+
+        # For Supervised Depth Loss -> (B, 128, 128)
+        self.depth_gen = nn.Sequential(
+            nn.Conv2d(self.feature_dim, 64, 3, padding=1),
+            nn.GELU(),
+            nn.Upsample(scale_factor=2, mode='nearest'),
+            nn.Conv2d(64, 32, 3, padding=1),
+            nn.GELU(),
+            nn.Upsample(scale_factor=2, mode='nearest'),
+            nn.Conv2d(32, 1, 1)
+        )
         
         self.decoder = nn.Sequential(
             nn.Linear(self.feature_dim, self.feature_dim),
@@ -163,18 +125,23 @@ class DeepMonocularModel(nn.Module):
         # Copied from MonocularModel
         # past: (B, 16, 6), intent: int
         past, images, intent = x['PAST'], x['IMAGES'], x['INTENT']
-
-        # NOTE: DEBUG. REMOVE THIS LATER!!!
-        # want to isolate the image fix to see if it's good or not
-        past = torch.zeros_like(past)
-        # intent = torch.ones_like(intent)
         
         # Ref: https://github.com/waymo-research/waymo-open-dataset/blob/5f8a1cd42491210e7de629b6f8fc09b65e0cbe99/src/waymo_open_dataset/dataset.proto#L50%20%20order%20=%20[2,%201,%203]
         front_cam = images[1]
-        with torch.no_grad():
-            feats = self.features(front_cam)  # list or tensor
+
+        # Doesn't need no_grad b/c DINO/SAMFeatures will freeze if needed
+        feats_vit = self.features(front_cam)  # list or tensor
+
+        if len(feats_vit) == 1 and isinstance(feats_vit, list):
+            feats_vit = feats_vit[0]
+
+        feats = self.visual_adapter(feats_vit)  # (B, C, H, W)
+
+        # Depth Supervision
+        output_depth = F.softplus(self.depth_gen(feats))
 
         # tokens: handle list of features or single tensor
+        # TODO: is this made redundant by if statement above?
         if isinstance(feats, (list, tuple)):
             tokens = torch.cat([f.flatten(2) for f in feats], dim=1)  # (B, C_total, N)
         else:
@@ -189,4 +156,7 @@ class DeepMonocularModel(nn.Module):
         for block in self.blocks:
             query = block(query, tokens)
 
-        return self.decoder(query.squeeze(1))
+        return {
+            "trajectory": self.decoder(query.squeeze(1)),
+            "depth": output_depth
+        }

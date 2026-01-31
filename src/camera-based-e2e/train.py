@@ -17,7 +17,8 @@ from loader import WaymoE2E
 
 # Replace with your model defined in models/ 
 from models.base_model import LitModel, collate_with_images
-from models.monocular import MonocularModel, DeepMonocularModel, SAMFeatures
+from models.monocular import DeepMonocularModel
+from models.feature_extractors import SAMFeatures
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
