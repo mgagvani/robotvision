@@ -3,14 +3,12 @@ from datetime import datetime
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.loggers import CSVLogger
+from pytorch_lightning.loggers import CSVLogger, WandbLogger
 
 from matplotlib import pyplot as plt
 import pandas as pd
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from pathlib import Path
 
 from loader import WaymoE2E
@@ -45,14 +43,19 @@ if __name__ == "__main__":
         model = torch.compile(model, mode="max-autotune")
     lit_model = LitModel(model=model, lr=args.lr)
 
-    base_path = Path(args.data_dir).parent.as_posix()
     # We don't want to save logs or checkpoints in the home directory - it'll fill up fast
+    base_path = Path(args.data_dir).parent.as_posix()
+    timestamp = f"camera_e2e_{datetime.now().strftime('%Y%m%d_%H%M')}"
+    wandb_logger = WandbLogger(name=timestamp, save_dir=base_path + "/logs", project="robotvision", log_model=True)
+    wandb_logger.watch(lit_model, log="all")
+
     strategy = "ddp_find_unused_parameters_true" if torch.cuda.device_count() > 1 else None
     trainer = pl.Trainer(
         max_epochs=args.max_epochs,
-        logger=CSVLogger(base_path + "/logs", name=f"camera_e2e_{datetime.now().strftime('%Y%m%d_%H%M')}"),
+        logger=[CSVLogger(base_path + "/logs", name=timestamp), wandb_logger],
         strategy=strategy,
         precision="bf16-mixed" if torch.cuda.is_bf16_supported() else 16,
+        log_every_n_steps=10,
         callbacks=[
             ModelCheckpoint(monitor='val_loss',
                              mode='min', 

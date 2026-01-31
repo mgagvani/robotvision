@@ -31,6 +31,8 @@ class LitModel(pl.LightningModule):
             'INTENT': torch.tensor([1.0]),  # INTENT
         },)
 
+        self.save_hyperparameters()
+
     def on_fit_start(self) -> None:
         super().on_fit_start()
         self.depth_loss = DepthLoss(self.device)
@@ -64,7 +66,7 @@ class LitModel(pl.LightningModule):
         pred_future = self.forward(model_inputs)  # (B, T*2)
         pred_depth = None
         if isinstance(pred_future, dict):
-            pred_future, pred_depth = pred_future["waypoints"], pred_future.get("depth", None)
+            pred_future, pred_depth = pred_future["trajectory"], pred_future.get("depth", None)
 
         loss_ade = self.ade_loss(pred_future.reshape_as(future), future)  # reshape to (B, T, 2)
 
