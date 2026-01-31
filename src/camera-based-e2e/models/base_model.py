@@ -20,10 +20,11 @@ class BaseModel(nn.Module):
         return self.nn(x)
     
 class LitModel(pl.LightningModule):
-    def __init__(self, model: nn.Module, lr: float):
+    def __init__(self, model: nn.Module, lr: float, lr_vision: float | None = None):
         super(LitModel, self).__init__()
         self.model = model
         self.hparams.lr = lr
+        self.hparams.lr_vision = lr_vision
 
         self.example_input_array = ({
             'PAST': torch.zeros((1, 16, 6)),  # PAST
@@ -47,6 +48,24 @@ class LitModel(pl.LightningModule):
     # ---- optimizers ----
     def configure_optimizers(self):
         # NOTE: This can be extended and tuned, LR especially will differ and have an impact.
+        # vision encoder, if trainable, should have 1/10 the LR of the rest of the model
+        if hasattr(self.model, "features"):
+            encoder_params = [p for p in self.model.features.parameters() if p.requires_grad]
+            other_params = [
+                p for n, p in self.model.named_parameters()
+                if not n.startswith("features.") and p.requires_grad
+            ]
+            if encoder_params:
+                encoder_lr = self.hparams.lr * 0.1 if self.hparams.lr_vision is None else self.hparams.lr_vision
+                return torch.optim.Adam(
+                    [
+                        {"params": other_params, "lr": self.hparams.lr},
+                        {"params": encoder_params, "lr": encoder_lr},
+                    ]
+                )
+            if other_params:
+                return torch.optim.Adam(other_params, lr=self.hparams.lr)
+
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.hparams.lr)
         return optimizer
     
@@ -77,6 +96,9 @@ class LitModel(pl.LightningModule):
             loss_depth = self.depth_loss(depth_in, pred_depth, loss_fn=F.l1_loss)
         else:
             loss_depth = torch.tensor(0.0, device=self.device)
+
+        loss_depth *= 0.0 # disabled
+        loss_ade *= 1.0 # TODO: tune loss terms
 
         # TODO: improve logging both to disk and to console
         self.log_dict({

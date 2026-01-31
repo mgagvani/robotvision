@@ -40,6 +40,7 @@ class SAMFeatures(nn.Module):
         if frozen:
             for param in self.sam_model.parameters():
                 param.requires_grad = False
+            self.sam_model.eval()
 
         channels = self.sam_model.feature_info.channels()
         reductions = self.sam_model.feature_info.reduction()

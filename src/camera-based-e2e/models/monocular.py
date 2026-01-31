@@ -138,7 +138,7 @@ class DeepMonocularModel(nn.Module):
         feats = self.visual_adapter(feats_vit)  # (B, C, H, W)
 
         # Depth Supervision
-        output_depth = F.softplus(self.depth_gen(feats))
+        output_depth = F.softplus(self.depth_gen(feats).squeeze(1))  # (B, 128, 128)
 
         # tokens: handle list of features or single tensor
         # TODO: is this made redundant by if statement above?
