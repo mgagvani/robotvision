@@ -57,7 +57,7 @@ class TransformerBlock(nn.Module):
             nn.Linear(mlp_dim, embed_dim)
         )
 
-    def forward(self, query: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
+    def forward(self, query: torch.Tensor, tokens: torch.Tensor, mask) -> torch.Tensor:
         # self attention
         query = query + self.self_attn(self.ln1(query))
         
