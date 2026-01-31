@@ -49,7 +49,7 @@ if __name__ == "__main__":
     wandb_logger = WandbLogger(name=timestamp, save_dir=base_path + "/logs", project="robotvision", log_model=True)
     wandb_logger.watch(lit_model, log="all")
 
-    strategy = "ddp_find_unused_parameters_true" if torch.cuda.device_count() > 1 else None
+    strategy = "ddp_find_unused_parameters_true" if torch.cuda.device_count() > 1 else "auto"
     trainer = pl.Trainer(
         max_epochs=args.max_epochs,
         logger=[CSVLogger(base_path + "/logs", name=timestamp), wandb_logger],
