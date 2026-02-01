@@ -78,7 +78,7 @@ class MonocularModel(nn.Module):
         return self.decoder(attention.squeeze(1))  # (B, 40)
 
 class DeepMonocularModel(nn.Module):
-    def __init__(self, feature_extractor, out_dim, n_blocks=1):
+    def __init__(self, feature_extractor, out_dim, n_blocks=1, n_proposals=50):
         super().__init__()
         self.features = feature_extractor
         self.feature_dim = sum(self.features.dims)
@@ -115,7 +115,7 @@ class DeepMonocularModel(nn.Module):
             nn.Conv2d(32, 1, 1)
         )
         
-        self.n_proposals = 50
+        self.n_proposals = n_proposals
         self.traj_decoder = nn.Sequential(
             nn.Linear(self.feature_dim, self.feature_dim),
             nn.GELU(),
