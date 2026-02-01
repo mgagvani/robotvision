@@ -118,7 +118,7 @@ class DeepMonocularModel(nn.Module):
         self.decoder = nn.Sequential(
             nn.Linear(self.feature_dim, self.feature_dim),
             nn.GELU(),
-            nn.Linear(self.feature_dim, out_dim),
+            nn.Linear(self.feature_dim, out_dim * 50),
         )
 
     def forward(self, x):

@@ -87,7 +87,32 @@ class LitModel(pl.LightningModule):
         if isinstance(pred_future, dict):
             pred_future, pred_depth = pred_future["trajectory"], pred_future.get("depth", None)
 
-        loss_ade = self.ade_loss(pred_future.reshape_as(future), future)  # reshape to (B, T, 2)
+        pred = pred_future
+        t_steps = future.shape[1]
+        t2 = t_steps * 2
+        k_modes = 50
+
+        if pred.ndim != 2:
+            raise ValueError(f"Unexpected pred shape {pred.shape}; expected (B, T*2) or (B, {k_modes}*T*2).")
+
+        if pred.shape[1] == t2:
+            pred = pred.view(pred.size(0), 1, t_steps, 2)
+        elif pred.shape[1] == k_modes * t2:
+            pred = pred.view(pred.size(0), k_modes, t_steps, 2)
+        else:
+            raise ValueError(f"Unexpected pred shape {pred.shape}; expected (B, T*2) or (B, {k_modes}*T*2).")
+
+        # ADE per mode: (B, K)
+        dist = torch.norm(pred - future[:, torch.newaxis, :, :], dim=-1)  # (B, K, T)
+        ade_per_mode = dist.mean(dim=-1)
+        best_ade = ade_per_mode.min(dim=1).values.mean()
+        loss_ade = best_ade
+
+        # if stage == "val":
+        #     ade_mode_mean = ade_per_mode.mean(dim=0)
+        #     ade_logs = {f"{stage}_ade_k{k}": ade_mode_mean[k] for k in range(ade_mode_mean.shape[0])}
+        #     ade_logs[f"{stage}_ade_multimodal"] = best_ade
+        #     self.log_dict(ade_logs, prog_bar=False, logger=True)
 
         # Depth Loss
         if pred_depth is not None:
@@ -131,4 +156,3 @@ def collate_with_images(batch):
         "IMAGES": images,
         "NAME": names,
     }
-
