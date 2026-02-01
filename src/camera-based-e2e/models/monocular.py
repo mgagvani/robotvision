@@ -115,11 +115,21 @@ class DeepMonocularModel(nn.Module):
             nn.Conv2d(32, 1, 1)
         )
         
-        self.decoder = nn.Sequential(
+        self.n_proposals = 50
+        self.traj_decoder = nn.Sequential(
             nn.Linear(self.feature_dim, self.feature_dim),
             nn.GELU(),
-            nn.Linear(self.feature_dim, out_dim * 50),
+            nn.Linear(self.feature_dim, self.feature_dim),
+            nn.GELU(),
+            nn.Linear(self.feature_dim, out_dim * self.n_proposals),
         )
+        self.score_decoder = nn.Sequential(
+            nn.Linear(self.feature_dim, self.feature_dim),
+            nn.GELU(),
+            nn.Linear(self.feature_dim, self.feature_dim),
+            nn.GELU(),
+            nn.Linear(self.feature_dim, self.n_proposals),
+        ) # no softmax, since we use cross entropy later
 
     def forward(self, x):
         # Copied from MonocularModel
@@ -156,7 +166,11 @@ class DeepMonocularModel(nn.Module):
         for block in self.blocks:
             query = block(query, tokens)
 
+        traj_pred = self.traj_decoder(query.squeeze(1))  # (B, K*T*2)
+        score_pred = self.score_decoder(query.squeeze(1))  # (B, K)
+
         return {
-            "trajectory": self.decoder(query.squeeze(1)),
+            "trajectory": traj_pred,
+            "scores": score_pred,
             "depth": output_depth
         }

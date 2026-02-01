@@ -85,12 +85,12 @@ class LitModel(pl.LightningModule):
         pred_future = self.forward(model_inputs)  # (B, T*2)
         pred_depth = None
         if isinstance(pred_future, dict):
-            pred_future, pred_depth = pred_future["trajectory"], pred_future.get("depth", None)
+            pred_future, pred_depth, pred_scores = pred_future["trajectory"], pred_future.get("depth", None), pred_future.get("scores", None)
 
         pred = pred_future
         t_steps = future.shape[1]
         t2 = t_steps * 2
-        k_modes = 50
+        k_modes = self.model.n_proposals if hasattr(self.model, "n_proposals") else 1
 
         if pred.ndim != 2:
             raise ValueError(f"Unexpected pred shape {pred.shape}; expected (B, T*2) or (B, {k_modes}*T*2).")
@@ -106,13 +106,19 @@ class LitModel(pl.LightningModule):
         dist = torch.norm(pred - future[:, torch.newaxis, :, :], dim=-1)  # (B, K, T)
         ade_per_mode = dist.mean(dim=-1)
         best_ade = ade_per_mode.min(dim=1).values.mean()
+        best_idx = ade_per_mode.argmin(dim=1)
         loss_ade = best_ade
 
-        # if stage == "val":
-        #     ade_mode_mean = ade_per_mode.mean(dim=0)
-        #     ade_logs = {f"{stage}_ade_k{k}": ade_mode_mean[k] for k in range(ade_mode_mean.shape[0])}
-        #     ade_logs[f"{stage}_ade_multimodal"] = best_ade
-        #     self.log_dict(ade_logs, prog_bar=False, logger=True)
+        # Scorer Losses
+        if k_modes > 1 and pred_scores is not None:
+            # construct one hot index for best mode
+            loss_score = F.cross_entropy(pred_scores, best_idx, reduction='mean')
+            acc_score = (pred_scores.argmax(dim=1) == best_idx).float().mean()
+            self.log_dict({
+                f"{stage}_score_acc": acc_score,
+            }, prog_bar=True, logger=True)
+        else:
+            loss_score = torch.tensor(0.0, device=self.device)
 
         # Depth Loss
         if pred_depth is not None:
@@ -124,15 +130,17 @@ class LitModel(pl.LightningModule):
 
         loss_depth *= 0.0 # disabled
         loss_ade *= 1.0 # TODO: tune loss terms
-
+        loss_score *= 1.0
+        total_loss = loss_ade + loss_depth + loss_score
         # TODO: improve logging both to disk and to console
         self.log_dict({
             f"{stage}_loss_ade": loss_ade,
+            f"{stage}_loss_score": loss_score,
             f"{stage}_loss_depth": loss_depth,
-            f"{stage}_loss": loss_ade + loss_depth,
+            f"{stage}_loss": total_loss,
         }, prog_bar=True, logger=True)
 
-        return loss_ade + loss_depth
+        return total_loss
     
     def training_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, "train")

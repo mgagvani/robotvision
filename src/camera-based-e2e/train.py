@@ -4,6 +4,7 @@ from datetime import datetime
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger, WandbLogger
+from pytorch_lightning.profilers import SimpleProfiler
 
 from matplotlib import pyplot as plt
 import pandas as pd
@@ -28,8 +29,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Data 
-    train_dataset = WaymoE2E(indexFile='index_train.pkl', data_dir=args.data_dir, images=True, n_items=100_000)
-    test_dataset = WaymoE2E(indexFile='index_val.pkl', data_dir=args.data_dir, images=True, n_items=10_000)
+    train_dataset = WaymoE2E(indexFile='index_train.pkl', data_dir=args.data_dir, images=True, n_items=25_000)
+    test_dataset = WaymoE2E(indexFile='index_val.pkl', data_dir=args.data_dir, images=True, n_items=5_000)
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=12, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
     val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=12, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
@@ -56,6 +57,7 @@ if __name__ == "__main__":
         strategy=strategy,
         precision="bf16-mixed" if torch.cuda.is_bf16_supported() else 16,
         log_every_n_steps=10,
+        profiler=SimpleProfiler(extended=True),
         callbacks=[
             ModelCheckpoint(monitor='val_loss',
                              mode='min', 
