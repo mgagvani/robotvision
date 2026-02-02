@@ -123,12 +123,18 @@ class DeepMonocularModel(nn.Module):
             nn.GELU(),
             nn.Linear(self.feature_dim, out_dim * self.n_proposals),
         )
+        self.traj_features = nn.Sequential(
+            nn.Linear(out_dim, self.feature_dim),
+            nn.GELU(),
+            nn.Linear(self.feature_dim, self.feature_dim),
+            nn.GELU(),
+        )
         self.score_decoder = nn.Sequential(
-            nn.Linear(self.feature_dim, self.feature_dim),
+            nn.Linear(self.feature_dim * 2, self.feature_dim),
             nn.GELU(),
             nn.Linear(self.feature_dim, self.feature_dim),
             nn.GELU(),
-            nn.Linear(self.feature_dim, self.n_proposals),
+            nn.Linear(self.feature_dim, 1),
         ) # no softmax, since we use cross entropy later
 
     def forward(self, x):
@@ -167,7 +173,11 @@ class DeepMonocularModel(nn.Module):
             query = block(query, tokens)
 
         traj_pred = self.traj_decoder(query.squeeze(1))  # (B, K*T*2)
-        score_pred = self.score_decoder(query.squeeze(1))  # (B, K)
+        traj_pred_flat = traj_pred.view(traj_pred.size(0), self.n_proposals, -1)  # (B, K, T*2)
+        traj_feat = self.traj_features(traj_pred_flat)  # (B, K, C)
+        query_for_score = query.squeeze(1)[:, torch.newaxis, :].expand(-1, self.n_proposals, -1)  # (B, K, C)
+        score_in = torch.cat([query_for_score, traj_feat], dim=-1)  # (B, K, 2C)
+        score_pred = self.score_decoder(score_in).squeeze(-1)  # (B, K)
 
         return {
             "trajectory": traj_pred,

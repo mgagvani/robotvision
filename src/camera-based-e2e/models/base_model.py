@@ -84,6 +84,7 @@ class LitModel(pl.LightningModule):
 
         pred_future = self.forward(model_inputs)  # (B, T*2)
         pred_depth = None
+        pred_scores: torch.Tensor = None
         if isinstance(pred_future, dict):
             pred_future, pred_depth, pred_scores = pred_future["trajectory"], pred_future.get("depth", None), pred_future.get("scores", None)
 
@@ -105,9 +106,21 @@ class LitModel(pl.LightningModule):
         # ADE per mode: (B, K)
         dist = torch.norm(pred - future[:, torch.newaxis, :, :], dim=-1)  # (B, K, T)
         ade_per_mode = dist.mean(dim=-1)
-        best_ade = ade_per_mode.min(dim=1).values.mean()
         best_idx = ade_per_mode.argmin(dim=1)
-        loss_ade = best_ade
+
+        # Top-M WTA for trajectory loss. Here, we have an "oracle" that picks the best mode
+        top_m = min(5, ade_per_mode.size(1))
+        loss_ade = ade_per_mode.topk(top_m, largest=False, dim=1).values.mean()
+
+        # Oracle ADE (best possible) and scorer-selected top-1 ADE (inference-style)
+        oracle_ade = ade_per_mode.min(dim=1).values.mean()
+        ade_pred = None
+        if pred_scores is not None and k_modes > 1:
+            pred_idx = pred_scores.argmax(dim=1)
+            ade_pred = ade_per_mode[torch.arange(pred.size(0), device=pred.device), pred_idx].mean()
+        elif k_modes == 1:
+            ade_pred = ade_per_mode.squeeze(1).mean()
+        regret = (ade_pred - oracle_ade) if ade_pred is not None else None
 
         # Scorer Losses
         if k_modes > 1 and pred_scores is not None:
@@ -133,12 +146,17 @@ class LitModel(pl.LightningModule):
         loss_score *= 1.0
         total_loss = loss_ade + loss_depth + loss_score
         # TODO: improve logging both to disk and to console
-        self.log_dict({
+        log_payload = {
             f"{stage}_loss_ade": loss_ade,
             f"{stage}_loss_score": loss_score,
             f"{stage}_loss_depth": loss_depth,
             f"{stage}_loss": total_loss,
-        }, prog_bar=True, logger=True)
+        }
+        if ade_pred is not None:
+            log_payload[f"{stage}_ade_pred"] = ade_pred
+            log_payload[f"{stage}_ade_oracle"] = oracle_ade
+            log_payload[f"{stage}_ade_regret"] = regret
+        self.log_dict(log_payload, prog_bar=True, logger=True)
 
         return total_loss
     
