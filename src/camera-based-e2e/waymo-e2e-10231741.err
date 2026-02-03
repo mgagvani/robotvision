@@ -1,5 +1,0 @@
-Traceback (most recent call last):
-  File "/scratch/gilbreth/shar1159/robotvision/src/camera-based-e2e/train.py", line 67, in <module>
-    all_intents = torch.cat(all_intents)
-RuntimeError: torch.cat(): expected a non-empty list of Tensors
-srun: error: gilbreth-e014: task 0: Exited with exit code 1

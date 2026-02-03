@@ -15,8 +15,9 @@ from pathlib import Path
 from loader import WaymoE2E
 
 # Replace with your model defined in models/
-from models.shrey_model import NewModel, LitModel
+from models.transfuser.team_code_transfuser.latentTF import LatentTFModel
 from models.base_model import collate_with_images
+from models.transfuser.team_code_transfuser.config import GlobalConfig
 
 
 if __name__ == "__main__":
@@ -28,6 +29,9 @@ if __name__ == "__main__":
     parser.add_argument("--train_index", type=str, default="index_train.pkl",
                     help="Train index .pkl (default: index_train.pkl)")
     args = parser.parse_args()
+
+    # Config
+    config = GlobalConfig(setting='eval')
 
     # Data
     train_dataset = WaymoE2E(
@@ -42,7 +46,7 @@ if __name__ == "__main__":
         indexFile="index_val.pkl",
         data_dir=args.data_dir,
         images=True,
-        n_items=5000
+        n_items=5000,
     )
 
     test_dataset = WaymoE2E(
@@ -61,11 +65,11 @@ if __name__ == "__main__":
         pin_memory=False,
     )
 
-    all_intents = []
-    for batch in train_loader:
-        all_intents.append(batch["INTENT"])
-    all_intents = torch.cat(all_intents)
-    print("ALL UNIQUE INTENT VALUES:", all_intents.unique())
+    # all_intents = []
+    # for batch in train_loader:
+    #     all_intents.append(batch["INTENT"])
+    # all_intents = torch.cat(all_intents)
+    # print("ALL UNIQUE INTENT VALUES:", all_intents.unique())
 
     val_loader = torch.utils.data.DataLoader(
         val_dataset,
@@ -77,11 +81,13 @@ if __name__ == "__main__":
     )
 
     # Model
-    in_dim = 16 * 6   # Past: (B, 16, 6)
-    out_dim = 20 * 2  # Future: (B, 20, 2)
-
-    model = NewModel(in_dim=in_dim, out_dim=out_dim)
-    lit_model = LitModel(model=model, lr=args.lr, test_out_path="test_metrics_normal.json")
+    lit_model = LatentTFModel(
+        config=config,
+        lr=args.lr,
+        image_architecture='resnet34',
+        lidar_architecture='resnet18',
+        use_velocity=True
+    )
 
     base_path = Path(args.data_dir).parent.as_posix()
 
@@ -96,7 +102,7 @@ if __name__ == "__main__":
                 mode="min",
                 save_top_k=1,
                 dirpath=base_path + "/checkpoints",
-                filename="camera-e2e-{epoch:02d}-{val_loss:.2f}",
+                filename="latent-tf-{epoch:02d}-{val_loss:.2f}",
             ),
         ],
     )

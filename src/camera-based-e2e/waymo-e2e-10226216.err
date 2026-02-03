@@ -1,8 +1,0 @@
-Traceback (most recent call last):
-  File "/scratch/gilbreth/shar1159/robotvision/src/camera-based-e2e/train.py", line 18, in <module>
-    from models.shrey_model import NewModel, LitModel
-  File "/scratch/gilbreth/shar1159/robotvision/src/camera-based-e2e/models/shrey_model.py", line 55
-    def __init__(self, model: nn.Module, lr: float, loss_out_path: str = "scene_loss.json"):
-    ^
-IndentationError: expected an indented block after class definition on line 54
-srun: error: gilbreth-h009: task 0: Exited with exit code 1

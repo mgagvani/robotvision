@@ -1,5 +1,0 @@
-Traceback (most recent call last):
-  File "/scratch/gilbreth/shar1159/robotvision/src/camera-based-e2e/train.py", line 18, in <module>
-    from models.shrey_model import NewModel, LitModel
-ImportError: cannot import name 'NewModel' from 'models.shrey_model' (/scratch/gilbreth/shar1159/robotvision/src/camera-based-e2e/models/shrey_model.py)
-srun: error: gilbreth-e011: task 0: Exited with exit code 1

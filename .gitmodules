@@ -1,0 +1,3 @@
+[submodule "/scratch/gilbreth/shar1159/robotvision/src/camera-based-e2e/models/transfuser"]
+	path = /scratch/gilbreth/shar1159/robotvision/src/camera-based-e2e/models/transfuser
+	url = https://github.com/autonomousvision/transfuser

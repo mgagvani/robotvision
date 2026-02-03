@@ -1,5 +1,0 @@
-Requested top_k=25000
-Found tuples: 0
-Missing names: 25000
-Example missing: ['2b74d20f67e018078588074153758632-161', '2b74d20f67e018078588074153758632-162', '54a8d79d034d3de050a3f29351499731-148', '57e34daab2df82dfd78edad9dfc8d56d-153', '54a8d79d034d3de050a3f29351499731-147']
-Wrote hard index: index_train_hard_25k.pkl
