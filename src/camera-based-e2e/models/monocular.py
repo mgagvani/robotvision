@@ -167,16 +167,16 @@ class DeepMonocularModel(nn.Module):
         # copy procedure to build query_0 from MonocularModel
         intent_onehot = F.one_hot((intent - 1).long(), num_classes=3).float()
         past_flat = past.view(past.size(0), -1)
-        query = self.query_init(torch.cat([intent_onehot, past_flat], dim=1)).unsqueeze(1)
+        query: torch.Tensor = self.query_init(torch.cat([intent_onehot, past_flat], dim=1)).unsqueeze(1)
 
         for block in self.blocks:
             query = block(query, tokens)
 
         traj_pred = self.traj_decoder(query.squeeze(1))  # (B, K*T*2)
         traj_pred_flat = traj_pred.view(traj_pred.size(0), self.n_proposals, -1)  # (B, K, T*2)
-        traj_feat = self.traj_features(traj_pred_flat)  # (B, K, C)
-        query_for_score = query.squeeze(1)[:, torch.newaxis, :].expand(-1, self.n_proposals, -1)  # (B, K, C)
-        score_in = torch.cat([query_for_score, traj_feat], dim=-1)  # (B, K, 2C)
+        traj_feat: torch.Tensor = self.traj_features(traj_pred_flat)  # (B, K, C)
+        query_for_score = query.squeeze(1).detach()[:, torch.newaxis, :].expand(-1, self.n_proposals, -1)  # (B, K, C)
+        score_in = torch.cat([query_for_score, traj_feat.detach()], dim=-1)  # (B, K, 2C)
         score_pred = self.score_decoder(score_in).squeeze(-1)  # (B, K)
 
         return {

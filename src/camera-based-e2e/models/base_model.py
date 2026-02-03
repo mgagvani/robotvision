@@ -109,27 +109,40 @@ class LitModel(pl.LightningModule):
         best_idx = ade_per_mode.argmin(dim=1)
 
         # Top-M WTA for trajectory loss. Here, we have an "oracle" that picks the best mode
+        # so, our loss is calculated on the mean of the top 5 trajectories.
         top_m = min(5, ade_per_mode.size(1))
         loss_ade = ade_per_mode.topk(top_m, largest=False, dim=1).values.mean()
 
-        # Oracle ADE (best possible) and scorer-selected top-1 ADE (inference-style)
+        # oracle ade is best of all proposals, since we have the GT data during training
         oracle_ade = ade_per_mode.min(dim=1).values.mean()
         ade_pred = None
+        # pred_scores is now the predicted ADE of each trajectory
         if pred_scores is not None and k_modes > 1:
-            pred_idx = pred_scores.argmax(dim=1)
+            pred_idx = pred_scores.argmin(dim=1)
             ade_pred = ade_per_mode[torch.arange(pred.size(0), device=pred.device), pred_idx].mean()
         elif k_modes == 1:
             ade_pred = ade_per_mode.squeeze(1).mean()
         regret = (ade_pred - oracle_ade) if ade_pred is not None else None
 
-        # Scorer Losses
+        # Scorer Losses -> encourage ranking of predicted scores to match true ranking of ades that are generated
         if k_modes > 1 and pred_scores is not None:
-            # construct one hot index for best mode
-            loss_score = F.cross_entropy(pred_scores, best_idx, reduction='mean')
-            acc_score = (pred_scores.argmax(dim=1) == best_idx).float().mean()
-            self.log_dict({
-                f"{stage}_score_acc": acc_score,
-            }, prog_bar=True, logger=True)
+            ade = ade_per_mode.detach()               # (B,K)
+            k = 10
+            tau = 0.5
+
+            # mask everything except true top-k modes
+            topk = ade.topk(k, largest=False, dim=1)
+            mask = torch.full_like(ade, float('-inf'))
+            mask.scatter_(1, topk.indices, 0.0)
+
+            rank_distribution = torch.softmax((-ade / tau) + mask, dim=1)
+
+            # if pred_scores is "lower is better", use -pred_scores as logits
+            p_log = torch.log_softmax((-pred_scores / tau) + mask, dim=1)
+
+            loss_score = (rank_distribution * (torch.log(rank_distribution + 1e-9) - p_log)).sum(dim=1).mean()
+            pred_idx = pred_scores.argmin(dim=1)
+            ade_pred = ade_per_mode[torch.arange(pred.size(0), device=pred.device), pred_idx].mean()
         else:
             loss_score = torch.tensor(0.0, device=self.device)
 
