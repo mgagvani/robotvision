@@ -24,7 +24,7 @@ if __name__ == "__main__":
     parser.add_argument('--data_dir', type=str, required=True, help='Path to Waymo E2E data directory')
     parser.add_argument('--batch_size', type=int, default=4, help='Batch size for training')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--max_epochs', type=int, default=10, help='Number of epochs to train')
+    parser.add_argument('--max_epochs', type=int, default=5, help='Number of epochs to train')
     args = parser.parse_args()
 
     # Data 
@@ -75,7 +75,7 @@ if __name__ == "__main__":
         plt.legend()
         plt.tight_layout()
         out = Path("./visualizations")
-        plt.savefig(out / "loss.png", dpi=200)
+        plt.savefig(out / f"loss_{run_dir.name}.png", dpi=200)
     except Exception as e:
         print(f"Could not save loss plot: {e}")
 

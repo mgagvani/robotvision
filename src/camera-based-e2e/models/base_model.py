@@ -55,20 +55,33 @@ class LitModel(pl.LightningModule):
             )
         )
 
-    def rfs_loss(self, pred, gt, speed, t_idx, r_bar=1.0):
+    def compute_direction(self, trajectory):
+        #coordinate projection
+        padded = F.pad(trajectory, (0, 0, 1, 0), mode='replicate') #pads the ground truth with the last known position at the start
+        displacement = padded[:, 1:] - padded[:, :-1] # (B, T, 2), displacement vectors
+
+        lng_dir = F.normalize(displacement, p=2, dim=-1, eps=1e-6) # computes and divides by L2 norm to get unit direction vectors in line with car's travel
+        lat_dir = torch.stack([-lng_dir[..., 1], lng_dir[..., 0]], dim=-1) # (B, T, 2), perpendicular vectors, (-y, x)
+
+        return lng_dir, lat_dir
+
+    def rfs_loss(self, pred, gt, lng_dir, lat_dir, speed, t_idx, r_bar=1.0):
         """
         pred, gt: (B, T, 2)
         speed: (B, T)
         t_idx: (T,) or (B, T)
         """
         # errors
-        delta = torch.abs(pred - gt) # (B, T, 2)
-        delta_lat = delta[..., 1] # (B, T, 1)
-        delta_lng = delta[..., 0] # (B, T, 1)
+        delta = (pred - gt) # (B, T, 2), error vectors
+
+        #project errors onto lat/lng directions
+        delta_lng = (delta * lng_dir).sum(dim=-1).abs() # (B, T)
+        delta_lat = (delta * lat_dir).sum(dim=-1).abs() # (B, T)
 
         # thresholds
         tau_lat_raw, tau_lng_raw = self.time_thresholds(t_idx)
         scale = self.speed_scale(speed)
+        if scale.dim() == 1: scale = scale.unsqueeze(1) # (B, 1) to (B, T)
 
         tau_lat = tau_lat_raw * scale
         tau_lng = tau_lng_raw * scale
@@ -109,23 +122,37 @@ class LitModel(pl.LightningModule):
         # create all input data that we are allowed to give to a model
         model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent}
 
-        speed = torch.norm(past[..., 2:4], dim=-1)  # (B, 16)
-
-        #create a batch of time indices from 1 to 20
-        t_idx = torch.tensor([3, 5], device=future.device).unsqueeze(0).repeat(future.size(0), 1)  # (B, 2)
+        speed = torch.norm(past[..., 2:4], dim=-1)[:, -1]  # (B,), speed at last observed time step
 
         pred_future = self.forward(model_inputs)  # (B, T*2)
         pred_future = pred_future.reshape_as(future)  # (B, T, 2)
 
-        rfs_loss = self.rfs_loss(pred_future[:, [11, 19], :], future[:, [11, 19], :] , speed[:, -1].unsqueeze(1).repeat(1,2), t_idx)  # reshape to (B, T, 2)
+        #compute direction vectors based on ground truth future trajectory
+        full_lng_dir, full_lat_dir = self.compute_direction(future)
+
+        indices = [11, 19]  # 3s and 5s into the future
+
+        pred_slice = pred_future[:, indices, :]
+        gt_slice = future[:, indices, :]
+        lng_dir_slice = full_lng_dir[:, indices, :]
+        lat_dir_slice = full_lat_dir[:, indices, :]
+
+        #create a batch of time indices from 1 to 20
+        t_idx = torch.tensor([3.0, 5.0], device=future.device).unsqueeze(0).expand(future.size(0), -1) # (B, 2)
+
+        rfs_loss = self.rfs_loss(pred_slice, gt_slice, lng_dir_slice, lat_dir_slice, speed, t_idx) 
+        
         ade_loss = self.ade_loss(pred_future, future)
         # TODO: improve logging both to disk and to console
         self.log_dict({
             f"{stage}_rfs_loss": rfs_loss,
             f"{stage}_ade_loss": ade_loss,
+            f"{stage}_loss": (ade_loss + rfs_loss),
         }, prog_bar=True, logger=True)
 
-        return rfs_loss
+        rfs_weight = 0.0
+
+        return (ade_loss + rfs_weight * rfs_loss)
     
     def training_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, "train")
@@ -149,4 +176,3 @@ def collate_with_images(batch):
         "IMAGES": images,
         "NAME": names,
     }
-
