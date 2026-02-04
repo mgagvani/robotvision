@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import math
 import torch.nn.functional as F
 import pytorch_lightning as pl
 
@@ -44,7 +45,7 @@ class LitModel(pl.LightningModule):
         return optimizer
     
     # ---- forward / step ----
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, stage="val") -> torch.Tensor:
         return self.model(x)
     
     def _shared_step(self, batch: torch.Tensor, stage: str) -> torch.Tensor:
@@ -77,7 +78,7 @@ class TrajectoryNoiseScheduler:
         self.timesteps = timesteps
         
         # 1. Define a linear schedule for beta
-        self.betas = torch.linspace(beta_start, beta_end, timesteps)
+        self.betas = torch.linspace(beta_start, beta_end, timesteps, device="cuda")
         
         # 2. Calculate alphas and alpha-bars
         self.alphas = 1.0 - self.betas
@@ -124,8 +125,8 @@ class DiffuseLitModel(pl.LightningModule):
         return optimizer
     
     # ---- forward / step ----
-    def forward(self, x: torch.Tensor, t) -> torch.Tensor:
-        return self.model(x, t)
+    def forward(self, x: torch.Tensor, t=torch.tensor(0 ), stage="val") -> torch.Tensor:
+        return self.model(x, t, stage)
     
     def _shared_step(self, batch: torch.Tensor, stage: str) -> torch.Tensor:
         past, future, images, intent = batch['PAST'], batch['FUTURE'], batch['IMAGES'], batch['INTENT']
@@ -135,12 +136,17 @@ class DiffuseLitModel(pl.LightningModule):
 
         t = torch.randint(0, 1000, (past.size(0),), device=past.device).long()
         noise = torch.randn_like(future, device=future.device)
-        future_noisy = self.noise_sched.add_noise(future, noise, t)
-        # create all input data that we are allowed to give to a model
-        model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent, 'FUTURE': future_noisy}
 
-        pred_noise = self.forward(model_inputs, t)  # (B, T*2)
-        loss = F.mse_loss(pred_noise, noise)  # reshape to (B, T, 2
+        if stage == "train":
+            future_noisy = self.noise_sched.add_noise(future, noise, t)
+            # create all input data that we are allowed to give to a model
+            model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent, 'FUTURE': future_noisy}
+            pred_noise = self.forward(model_inputs, t, stage)  # (B, T*2)
+            loss = F.mse_loss(pred_noise.reshape_as(noise), noise)  # reshape to (B, T, 2
+        else:
+            model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent, 'FUTURE': future}
+            pred = self.forward(model_inputs, 0, stage)
+            loss = self.ade_loss(pred.reshape_as(future), future)
 
         # TODO: improve logging both to disk and to console
         self.log_dict({
@@ -154,6 +160,7 @@ class DiffuseLitModel(pl.LightningModule):
     
     def validation_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, "val")
+
 
 def collate_with_images(batch):
     past = [torch.as_tensor(b["PAST"], dtype=torch.float32) for b in batch]

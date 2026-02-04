@@ -21,4 +21,30 @@ Use current + past to make future state
 
 slurm-10242008 - Full AR
 slurm-10242775 - Full AR w/ improved sequence
-slurm       
+slurm-10243410 - Full AR w/ Teacher for faster training
+
+slurm-10248865 - Diffusion fixed
+slurm-10248974/9061 - VAE Dense model (Didn't fully freeze VAE weights, but loss 1.59 1.6)
+
+slurm-10249582 - Better VAE (hidden_dim=512, latent_dim=8, num_layers=4)
+slurm-10249621 - Better Diffuse using DDPM from diffusers + x0 pred (loss: 1.72)
+
+slurm-10250570 - VAE Dense w/ 'Better VAE'
+
+slurm-10250597 - Diffusion with timm/fastvit_t8.apple_dist_in1k
+slurm-10252020 - VAE Dense w/ original VAE (loss: 1.75)
+
+slurm-10252021 - VAE (hidden_dim=128, latent_dim=12, num_layers=3)
+slurm-10252031 - Epsilon Diffusion w/ 1 layer
+
+slurm-10252564 - DiffusionLTF 
+
+Better diffusions
+
+
+Try:
+VAE w/ fully normalized input data
+Diffusion w/ fully normalized input data
+VAE Dense w/ above VAE
+
+Create VAE fine-tunning

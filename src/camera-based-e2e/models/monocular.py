@@ -1,4 +1,5 @@
 from typing import List, Optional
+import math
 
 import torch
 import torch.nn as nn
@@ -9,6 +10,7 @@ from math import sqrt, log
 
 from .base_model import BaseModel, LitModel
 from .blocks import TransformerBlock
+from .vae import LSTM_VAE, VAEModel
 
 class DINOFeatures(nn.Module):
     def __init__(self, model_name: str = "vit_small_plus_patch16_dinov3.lvd1689m", frozen: bool = True):
@@ -36,16 +38,24 @@ class SinusoidalPosEmb(nn.Module):
         super().__init__()
         self.dim = dim
 
-    def forward(self, x):
-        device = x.device
+    def forward(self, time):
+        device = time.device
         half_dim = self.dim // 2
-        # Create a range of frequencies
-        emb = log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        # Apply sin and cos to the timestep scaled by frequencies
-        emb = x[:, None] * emb[None, :]
-        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
-        return emb
+        embeddings = log(10000) / (half_dim - 1)
+        embeddings = torch.exp(torch.arange(half_dim, device=device) * -embeddings)
+        
+        # Handle different input shapes
+        original_shape = time.shape
+        time = time.flatten()  # Flatten to 1D
+        
+        embeddings = time[:, None] * embeddings[None, :]
+        embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
+        
+        # Restore original batch dimensions if needed
+        if len(original_shape) > 1:
+            embeddings = embeddings.view(*original_shape, -1)
+        
+        return embeddings
 
 class SAMFeatures(nn.Module):
     def __init__(
@@ -148,7 +158,7 @@ class MonocularModel(nn.Module):
         attention = self.attn_norm(attention)
         return self.decoder(attention.squeeze(1))  # (B, 40)
 
-class DeepMonocularModelOrig(nn.Module):
+class DeepMonocularModel(nn.Module):
     def __init__(self, feature_extractor, out_dim, n_layers=1):
         super().__init__()
         self.features = feature_extractor
@@ -201,8 +211,74 @@ class DeepMonocularModelOrig(nn.Module):
             query = block(query, tokens)
 
         return self.decoder(query.squeeze(1))
-    
-class DeepMonocularModel(nn.Module):
+
+class DeepMonocularModelVAE(nn.Module):
+    def __init__(self, feature_extractor, out_dim, n_layers=1):
+        super().__init__()
+        self.features = feature_extractor
+        self.features.eval()
+        self.feature_dim = sum(self.features.dims)
+        self.vae = VAEModel.load_from_checkpoint("/home/bnamikas/git/robotvision/src/camera-based-e2e/e2e-vae-epoch=00-val_loss=3.88.ckpt", model=LSTM_VAE())
+        self.vae.model.eval()
+        for param in self.vae.model.parameters():
+            param.requires_grad = False
+
+        
+        # Initial Query Projection (Intent + Past -> C)
+        query_input_dim = 3 + 16 * 6
+        self.query_init = nn.Linear(query_input_dim, self.feature_dim)
+
+        # learnable positional encoding
+        self.n_tokens = self.features.data_config["input_size"][1] // self.features.patch_size * (self.features.data_config["input_size"][2] // self.features.patch_size)
+        self.positional_encoding = nn.Parameter(nn.init.trunc_normal_(torch.zeros((1, self.n_tokens, self.feature_dim)), std=0.02)) # (1, N, C)
+        
+        # Deep network rather than single attention in MonocularModel 
+        self.blocks = nn.ModuleList([
+            TransformerBlock(self.feature_dim, num_heads=8, mlp_dim=self.feature_dim*4)
+            for _ in range(n_layers)
+        ])
+        
+        self.decoder = nn.Sequential(
+            nn.Linear(self.feature_dim, self.feature_dim),
+            nn.Sigmoid(),
+            nn.Linear(self.feature_dim, self.vae.model.latent_dim)
+        )
+
+    def forward(self, x, *args, **kwargs):
+        # Copied from MonocularModel
+        # past: (B, 16, 6), intent: int
+        past, images, intent = x['PAST'], x['IMAGES'], x['INTENT']
+        
+        # Ref: https://github.com/waymo-research/waymo-open-dataset/blob/5f8a1cd42491210e7de629b6f8fc09b65e0cbe99/src/waymo_open_dataset/dataset.proto#L50%20%20order%20=%20[2,%201,%203]
+        front_cam = images[1]
+        with torch.no_grad():
+            feats = self.features(front_cam)  # list or tensor
+
+        # tokens: handle list of features or single tensor
+        if isinstance(feats, (list, tuple)):
+            tokens = torch.cat([f.flatten(2) for f in feats], dim=1)  # (B, C_total, N)
+        else:
+            tokens = feats.flatten(2)  # (B, C, N)
+        tokens = torch.permute(tokens, (0, 2, 1)) + self.positional_encoding # (B, N, C_total)
+        
+        # copy procedure to build query_0 from MonocularModel
+        intent_onehot = F.one_hot((intent - 1).long(), num_classes=3).float()
+        past_flat = past.view(past.size(0), -1)
+        query = self.query_init(torch.cat([intent_onehot, past_flat], dim=1)).unsqueeze(1)
+
+        for block in self.blocks:
+            query = block(query, tokens)
+
+        latent = self.decoder(query.squeeze(1))
+
+        z_repeated = latent.unsqueeze(1).repeat(1, 20, 1)
+        decoder_out, _ = self.vae.model.decoder_lstm(z_repeated)
+        output = self.vae.model.final_layer(decoder_out)
+        
+        return output
+
+
+class DeepMonocularModelAR(nn.Module):
     def __init__(self, feature_extractor, out_dim=2, n_layers=1):
         super().__init__()
         self.features = feature_extractor
@@ -280,183 +356,111 @@ class DeepMonocularModel(nn.Module):
         return torch.stack(outputs, dim=1)
 
 class ARMonocularModel(nn.Module):
-    def __init__(self, feature_extractor, out_dim=2, n_layers=3):
+    def __init__(self, feature_extractor, out_dim=0, n_layers=3, n_heads=16):
         super().__init__()
         self.features = feature_extractor
-        self.features.eval()
+        # Freeze backbone for memory efficiency
+        for param in self.features.parameters():
+            param.requires_grad = False
+            
         self.feature_dim = sum(self.features.dims)
-
-        # Initial Query Projection (Intent + Past -> C)
-        query_input_dim = 3 + 16 * 6 + (2) + 20
-        self.query_init = nn.Linear(query_input_dim, self.feature_dim)
-
-        # learnable positional encoding
-        self.n_tokens = self.features.data_config["input_size"][1] // self.features.patch_size * (self.features.data_config["input_size"][2] // self.features.patch_size)
-        self.positional_encoding = nn.Parameter(nn.init.trunc_normal_(torch.zeros((1, self.n_tokens, self.feature_dim)), std=0.02)) # (1, N, C)
-
-        self.future_queries = nn.Parameter(torch.randn(1, 20, self.feature_dim))
-
-        self.pos_proj = nn.Sequential(
-            nn.Linear(2, self.feature_dim),
-            nn.LayerNorm(self.feature_dim),
-            nn.ReLU()
-        )
-        self.time_embeds = nn.Embedding(36, self.feature_dim) 
-
+        
+        # 1. Image Spatial Encoding
+        # Assuming input 224x224 and patch 16 -> 14x14 = 196 tokens
+        self.n_img_tokens = 1024
+        self.img_pos_enc = nn.Parameter(torch.randn(1, self.n_img_tokens, self.feature_dim) * 0.02)
+        
+        # 2. Temporal & Metadata Encodings
+        self.time_embeds = nn.Embedding(36, self.feature_dim) # 0-15 past, 16-35 future
+        self.intent_embeds = nn.Embedding(3, self.feature_dim)
         self.past_encoder = nn.Linear(6, self.feature_dim)
-        self.past_pos_encoder = nn.Linear(2, self.feature_dim)  # separate encoding for x,y position
-
-
-        self.path_queries = nn.Parameter(torch.randn(1, 20, self.feature_dim))
-        self.intent_embeds = nn.Parameter(torch.randn(1, 3,self.feature_dim))
-        # Deep network rather than single attention in MonocularModel 
+        
+        # 3. Trajectory Projection (The AR "Bridge")
+        self.pos_proj = nn.Linear(2, self.feature_dim)
+        
+        # 4. Transformer Backbone
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.feature_dim,
-            nhead=16,
+            nhead=n_heads,
             dim_feedforward=self.feature_dim * 4,
             dropout=0.1,
-            batch_first=True, 
+            batch_first=True,
             norm_first=True
         )
-
-        self.blocks = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=n_layers
-        )
-
-
-        self.causal_mask = None
-
+        self.blocks = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+        
+        # 5. Output Head
         self.decoder = nn.Sequential(
             nn.Linear(self.feature_dim, self.feature_dim),
             nn.GELU(),
-            nn.Linear(self.feature_dim, self.feature_dim),
-            nn.GELU(),
-            nn.Linear(self.feature_dim, 2),
+            nn.Linear(self.feature_dim, 2) # Predicting (x, y)
         )
 
-    def forward(self, x):
-        # Copied from MonocularModel
-        # past: (B, 16, 6), intent: int
-        past, images, intent = x['PAST'], x['IMAGES'], x['INTENT']
-        device = past.device
-        # Ref: https://github.com/waymo-research/waymo-open-dataset/blob/5f8a1cd42491210e7de629b6f8fc09b65e0cbe99/src/waymo_open_dataset/dataset.proto#L50%20%20order%20=%20[2,%201,%203]
-        front_cam = images[1]
-
+    def _get_image_features(self, images):
         with torch.no_grad():
-            feats = self.features(front_cam)  # list or tensor
-
-        # tokens: handle list of features or single tensor
-        if isinstance(feats, (list, tuple)):
-            image_tokens = torch.cat([f.flatten(2) for f in feats], dim=1)  # (B, C_total, N)
-        else:
-            image_tokens = feats.flatten(2)  # (B, C, N)
-        image_tokens = torch.permute(image_tokens, (0, 2, 1)) + self.positional_encoding # (B, N, C_total)
-
-
-        # copy procedure to build query_0 from MonocularModel
-        intent_indices = (intent - 1).long().clamp(0, 2)  # (B,)
-        intent_token = self.intent_embeds[:, intent_indices, :].squeeze(0) 
-        intent_token = intent_token.unsqueeze(1)
-
-        past_tokens = self.past_encoder(past)  # (B, 16, C)
-        past_positions = self.past_pos_encoder(past[:, :, 0:2])
-        past_time_embeds = self.time_embeds(torch.arange(0, 16, device=device))
-        past_tokens = past_tokens + past_positions + past_time_embeds  # (B, 16, C)
-
-        context_tokens = torch.cat([image_tokens, intent_token, past_tokens], dim=1)
-
-        future_tokens = self.future_queries.expand(past.size(0), -1, -1)  # (B, 20, C)
-        future_tokens = future_tokens + self.time_embeds(torch.arange(16, 36, device=device))
-
-        predictions = []
-    
-        for t in range(20):
-            current_future = future_tokens[:, :t+1, :]
-            tokens = torch.cat([context_tokens, current_future], dim=1)
-            
-            if t == 0:
-                mask = None
+            self.features.eval()
+            # Front camera is usually index 1 in your setup
+            feats = self.features(images[1]) 
+            if isinstance(feats, (list, tuple)):
+                feats = torch.cat([f.flatten(2) for f in feats], dim=1)
             else:
-                mask_len = context_tokens.size(1) + t + 1
-                future_start = context_tokens.size(1)
-                mask = torch.zeros((mask_len, mask_len), device=device, dtype=torch.float32)
-                future_mask = torch.triu(torch.ones(t+1, t+1, device=device, dtype=torch.float32), diagonal=1)
-                future_mask = future_mask.masked_fill(future_mask == 1, float('-inf'))
+                feats = feats.flatten(2)
+        return feats.permute(0, 2, 1) + self.img_pos_enc
 
-                mask[future_start:, future_start:] = future_mask
+    def forward(self, x, stage, noise_std=0.05):
+        past, images, intent, target_traj = x['PAST'], x['IMAGES'], x['INTENT'], x["FUTURE"]
+        device = past.device
+        B = past.shape[0]
 
+        # --- Context Preparation ---
+        img_tokens = self._get_image_features(images)
+        
+        intent_idx = (intent - 1).long().clamp(0, 2)
+        intent_tok = self.intent_embeds(intent_idx).unsqueeze(1)
+        
+        past_toks = self.past_encoder(past) + self.time_embeds(torch.arange(16, device=device))
+        
+        context = torch.cat([img_tokens, intent_tok, past_toks], dim=1)
+        
+        # --- Training Mode (Parallel with Teacher Forcing + Noise) ---
+        if stage != "val" and target_traj is not None:
+            # Shift target to use as input: [Last Past Pos, T0, T1... T18]
+            last_pos = past[:, -1:, :2]
+            tf_inputs = torch.cat([last_pos, target_traj[:, :-1, :2]], dim=1)
             
-            tokens = self.blocks(tokens, mask=mask)
+            # Injection of noise to force error correction learning
+            tf_inputs = tf_inputs + torch.randn_like(tf_inputs) * noise_std
             
-            pred_t = self.decoder(tokens[:, -1:, :])  # (B, 1, 2)
-            predictions.append(pred_t)
+            future_toks = self.pos_proj(tf_inputs) + self.time_embeds(torch.arange(16, 36, device=device))
             
-            if t < 19:
-                future_tokens[:, t+1, :] = future_tokens[:, t+1, :] + self.pos_proj(pred_t.squeeze(1))
-    
-        predictions = torch.cat(predictions, dim=1)
-        
-        return predictions
+            full_seq = torch.cat([context, future_toks], dim=1)
+            
+            # Causal mask for the future tokens
+            seq_len = full_seq.size(1)
+            mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1).bool()
+            
+            out = self.blocks(full_seq, mask=mask)
+            # Only decode the last 20 tokens (the future)
+            return self.decoder(out[:, -20:, :])
 
-class DiffusionMonocularModel(nn.Module):
-    def __init__(self, feature_extractor, out_dim, n_layers=1):
-        super().__init__()
-        self.features = feature_extractor
-        self.features.eval()
-        self.feature_dim = sum(self.features.dims)
-        
-        # Initial Query Projection (Intent + Past -> C)
-        query_input_dim = 3 + 16 * 6 + self.feature_dim + 40 
-        self.query_init = nn.Linear(query_input_dim, self.feature_dim)
-
-        # learnable positional encoding
-        self.n_tokens = self.features.data_config["input_size"][1] // self.features.patch_size * (self.features.data_config["input_size"][2] // self.features.patch_size)
-        self.positional_encoding = nn.Parameter(nn.init.trunc_normal_(torch.zeros((1, self.n_tokens, self.feature_dim)), std=0.02)) # (1, N, C)
-
-        self.time_embed = nn.Sequential(
-            SinusoidalPosEmb(self.feature_dim),
-            nn.Linear(self.feature_dim, self.feature_dim * 4),
-            nn.SiLU(), # SiLU (Swish) is standard in diffusion
-            nn.Linear(self.feature_dim * 4, self.feature_dim)
-        )
-        
-        # Deep network rather than single attention in MonocularModel 
-        self.blocks = nn.ModuleList([
-            TransformerBlock(self.feature_dim, num_heads=8, mlp_dim=self.feature_dim*4)
-            for _ in range(n_layers)
-        ])
-        
-        self.decoder = nn.Sequential(
-            nn.Linear(self.feature_dim, self.feature_dim),
-            nn.GELU(),
-            nn.Linear(self.feature_dim, 40),
-        )
-
-    def forward(self, x, t):
-        # Copied from MonocularModel
-        # past: (B, 16, 6), intent: int
-        past, images, intent, future = x['PAST'], x['IMAGES'], x['INTENT'], x['FUTURE']
-        
-        # Ref: https://github.com/waymo-research/waymo-open-dataset/blob/5f8a1cd42491210e7de629b6f8fc09b65e0cbe99/src/waymo_open_dataset/dataset.proto#L50%20%20order%20=%20[2,%201,%203]
-        front_cam = images[1]
-        with torch.no_grad():
-            feats = self.features(front_cam)  # list or tensor
-
-        # tokens: handle list of features or single tensor
-        if isinstance(feats, (list, tuple)):
-            tokens = torch.cat([f.flatten(2) for f in feats], dim=1)  # (B, C_total, N)
+        # --- Inference Mode (Autoregressive Loop) ---
         else:
-            tokens = feats.flatten(2)  # (B, C, N)
-        tokens = torch.permute(tokens, (0, 2, 1)) + self.positional_encoding # (B, N, C_total)
-        
-        t_emb = self.time_embed(t).unsqueeze(1)
-        # copy procedure to build query_0 from MonocularModel
-        intent_onehot = F.one_hot((intent - 1).long(), num_classes=3).float()
-        past_flat = past.view(past.size(0), -1)
-        query = self.query_init(torch.cat([future.view(future.size(0), -1), intent_onehot, past_flat, t_emb], dim=1)).unsqueeze(1)
-
-        for block in self.blocks:
-            query = block(query, tokens)
-
-        return self.decoder(query.squeeze(1))
+            current_seq = context
+            predictions = []
+            last_coord = past[:, -1:, :2]
+            
+            for t in range(20):
+                # Prepare mask for current sequence length
+                curr_len = current_seq.size(1)
+                mask = torch.triu(torch.ones(curr_len, curr_len, device=device), diagonal=1).bool()
+                
+                # Only need the last output to predict the next step
+                out = self.blocks(current_seq, mask=mask)
+                pred_t = self.decoder(out[:, -1:, :])
+                predictions.append(pred_t)
+                
+                # Feedback loop
+                next_tok = self.pos_proj(pred_t) + self.time_embeds(torch.tensor([16 + t], device=device))
+                current_seq = torch.cat([current_seq, next_tok], dim=1)
+                
+            return torch.cat(predictions, dim=1)

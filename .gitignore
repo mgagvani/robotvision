@@ -4,6 +4,7 @@
 **/*logs/**
 **/wandb/**
 
+*.ckpt
 slurm-*
 
 # Byte-compiled / optimized / DLL files

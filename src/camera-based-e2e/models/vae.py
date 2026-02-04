@@ -32,7 +32,7 @@ class VAEModel(pl.LightningModule):
         return optimizer
     
     # ---- forward / step ----
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         return self.model(x)
     
     def _shared_step(self, batch: torch.Tensor, stage: str) -> torch.Tensor:

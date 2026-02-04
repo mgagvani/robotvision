@@ -51,7 +51,7 @@ class WaymoE2E(IterableDataset):
         if not self.images:
             return np.array([])
         
-        img_tensor = torch.from_numpy(np.frombuffer(img, dtype=np.uint8).copy()) 
+        img_tensor = torch.from_numpy(np.frombuffer(img, dtype=np.uint8).copy())
         gpu_tensors_list = torchvision.io.decode_jpeg(
             img_tensor, 
             mode=torchvision.io.ImageReadMode.UNCHANGED,
@@ -110,17 +110,43 @@ if __name__ == "__main__":
     loader = DataLoader(
         dataset, 
         batch_size=BATCH_SIZE,
-        num_workers=1,
+        num_workers=3,
     )
+
     
     def main():
+        n_samples = 0
+        sum_p = None
+        sq_sum_p = None
+        sum_f = None
+        sq_sum_f = None
         # start = time.time()
-        for batch_of_frames in tqdm(loader):
-            print(batch_of_frames["FUTURE"])
-            break
-            # print(batch_of_frames.keys(), [b.shape for b in batch_of_frames.values() if isinstance(b, torch.Tensor)])
-            pass
-        # print("Total Time:", time.time()-start)
-    
+        for batch in tqdm(loader):
+            past, future = batch["PAST"], batch["FUTURE"] # Shape: [B, T, D]
+
+            if sum_p is None:
+                device = past.device
+                sum_p = torch.zeros(past.shape[1], past.shape[2]).to(device)
+                sq_sum_p = torch.zeros(past.shape[1], past.shape[2]).to(device)
+                sum_f = torch.zeros(future.shape[1], future.shape[2]).to(device)
+                sq_sum_f = torch.zeros(future.shape[1], future.shape[2]).to(device)
+
+            n_samples += past.shape[0]
+
+            sum_p += torch.sum(past, dim=0)
+            sq_sum_p += torch.sum(past ** 2, dim=0)
+
+            sum_f += torch.sum(future, dim=0)
+            sq_sum_f += torch.sum(future ** 2, dim=0)
+
+        mean_p = sum_p / n_samples # Shape: [T, D]
+        std_p = torch.sqrt((sq_sum_p / n_samples) - (mean_p ** 2))
+        torch.save({'mean': mean_p, 'std': std_p}, 'past_normal_values.pt')
+
+        mean_f = sum_f / n_samples # Shape: [T, D]
+        std_f = torch.sqrt((sq_sum_f / n_samples) - (mean_f ** 2))
+        torch.save({'mean': mean_f, 'std': std_f}, 'future_normal_values.pt')
+
+
     import cProfile
     main()
