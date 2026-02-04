@@ -104,7 +104,7 @@ if __name__ == "__main__":
     import time
     from tqdm import tqdm
     # NOTE: Replace with your path
-    DATA_DIR = '/scratch/gilbreth/mgagvani/wod/waymo_open_dataset_end_to_end_camera_v_1_0_0/'
+    DATA_DIR = '/scratch/gilbreth/$USER/wod/waymo_open_dataset_end_to_end_camera_v_1_0_0/'
     BATCH_SIZE = 32
     dataset = WaymoE2E(indexFile="index_train.pkl", data_dir = DATA_DIR, images=True)
     loader = DataLoader(

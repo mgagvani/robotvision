@@ -15,7 +15,7 @@ from transformers import (
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from loader import WaymoE2E
-os.environ["HF_HOME"] = "/scratch/gilbreth/mgagvani/hfcache/"
+os.environ["HF_HOME"] = "/scratch/gilbreth/$USER/hfcache/"
 
 
 def predict_waypoints_json(model, front_img: Image.Image, intent: int, past: np.ndarray):
@@ -121,7 +121,7 @@ if __name__ == "__main__":
     )
     base_model.eval()
 
-    ADAPTER_DIR = "/scratch/gilbreth/mgagvani/robotvision_scratch/Cosmos-Reason2-2B_12-27-19-12"
+    ADAPTER_DIR = "/scratch/gilbreth/$USER/robotvision_scratch/Cosmos-Reason2-2B_12-27-19-12"
     lora_model = PeftModel.from_pretrained(
         base_model,  # start from base
         ADAPTER_DIR,  # load LoRA weights
@@ -131,7 +131,7 @@ if __name__ == "__main__":
 
     processor = AutoProcessor.from_pretrained("nvidia/Cosmos-Reason2-2B")
 
-    DATA_DIR = "/scratch/gilbreth/mgagvani/wod/waymo_open_dataset_end_to_end_camera_v_1_0_0/" 
+    DATA_DIR = "/scratch/gilbreth/$USER/wod/waymo_open_dataset_end_to_end_camera_v_1_0_0/" 
     dataset = WaymoE2E(
         indexFile="index_val.pkl",
         data_dir=DATA_DIR,

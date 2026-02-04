@@ -19,11 +19,11 @@ from loader import WaymoE2E
 
 USE_LORA = True
 
-os.environ["HF_HOME"] = "/scratch/gilbreth/mgagvani/hfcache/"
+os.environ["HF_HOME"] = "/scratch/gilbreth/$USER/hfcache/"
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 model_id = "nvidia/Cosmos-Reason2-2B"  # IMPORTANT: use a real Qwen3-VL checkpoint
-OUT_DIR = f"/scratch/gilbreth/mgagvani/robotvision_scratch/{model_id.split('/')[-1]}_{datetime.now().strftime('%m-%d-%H-%M')}"
+OUT_DIR = f"/scratch/gilbreth/$USER/robotvision_scratch/{model_id.split('/')[-1]}_{datetime.now().strftime('%m-%d-%H-%M')}"
 
 wandb.init(project="robotvision", name=OUT_DIR[47:])
 
@@ -128,7 +128,7 @@ if USE_LORA:
     model.config.use_cache = False
 
 # ---- dataset ----
-DATA_DIR = "/scratch/gilbreth/mgagvani/wod/waymo_open_dataset_end_to_end_camera_v_1_0_0/"
+DATA_DIR = "/scratch/gilbreth/$USER/wod/waymo_open_dataset_end_to_end_camera_v_1_0_0/"
 train_dataset = WaymoE2E(
     indexFile="index_train.pkl",
     data_dir=DATA_DIR,

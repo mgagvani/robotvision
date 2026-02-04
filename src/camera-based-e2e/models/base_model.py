@@ -56,12 +56,15 @@ class LitModel(pl.LightningModule):
         model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent}
 
         pred_future = self.forward(model_inputs)  # (B, T*2)
-        loss = self.ade_loss(pred_future.reshape_as(future), future)  # reshape to (B, T, 2
+        loss = self.ade_loss(pred_future.reshape_as(future), future)  # reshape to (B, T, 2)
 
-        # TODO: improve logging both to disk and to console
-        self.log_dict({
-            f"{stage}_loss": loss,
-        }, prog_bar=True, logger=True)
+        batch_size = past.shape[0]
+        self.log_dict(
+            {f"{stage}_loss": loss},
+            prog_bar=True,
+            logger=True,
+            batch_size=batch_size,
+        )
 
         return loss
     

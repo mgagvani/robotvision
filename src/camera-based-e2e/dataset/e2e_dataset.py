@@ -109,7 +109,7 @@ if __name__ == "__main__":
     from torch.utils.data import DataLoader
 
     # NOTE: Replace with your path
-    DATA_DIR = "/scratch/gilbreth/mgagvani/wod/e2e_exported"
+    DATA_DIR = "/scratch/gilbreth/$USER/wod/e2e_exported"
     BATCH_SIZE = 32
     dataset = E2EDataset(root_dir=DATA_DIR, split="train", images=False)
     loader = DataLoader(
