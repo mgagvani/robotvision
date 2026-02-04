@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import IterableDataset
-from protos import e2e_pb2
+from waymo_open_dataset.protos import end_to_end_driving_data_pb2 as e2e_pb2
 import torchvision
 import pickle
 import struct
@@ -105,7 +105,7 @@ if __name__ == "__main__":
     from tqdm import tqdm
     # NOTE: Replace with your path
     DATA_DIR = '/scratch/gilbreth/mgagvani/wod/waymo_open_dataset_end_to_end_camera_v_1_0_0/'
-    BATCH_SIZE = 4
+    BATCH_SIZE = 32
     dataset = WaymoE2E(indexFile="index_train.pkl", data_dir = DATA_DIR, images=True)
     loader = DataLoader(
         dataset, 
