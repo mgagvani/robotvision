@@ -29,7 +29,7 @@ class DINOFeatures(nn.Module):
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
         # x: (B, 3, H, W)
         # transforms: resize 256x256, center crop, normalize
-        x_t = self.transforms(x.float()) # preprocess
+        x_t = self.transforms(x.float().div(255.0)) # preprocess
         features = self.dino_model(x_t)
         return features # 3 x [B, 384, 16, 16]
 
@@ -82,7 +82,7 @@ class SAMFeatures(nn.Module):
 
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
         # x: (B, 3, H, W)
-        x_t = self.transforms(x.float())  # preprocess
+        x_t = self.transforms(x.float().div(255.0))  # preprocess
         feats = self.sam_model(x_t)       # list of feature maps
         return [feats[self.feature_stage]]
 

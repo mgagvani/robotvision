@@ -13,13 +13,12 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger
 
-from diffusers import DDPMScheduler
+from diffusers import DDIMScheduler
 from diffusers.models.embeddings import Timesteps
 
 from loader import WaymoE2E
 from models.base_model import LitModel, collate_with_images
 from models.monocular import MonocularModel, DeepMonocularModel, SAMFeatures
-from models.vae import VAE_Est, VAEModel, LSTM_VAE
 from models.blocks import TransformerBlock
 
 class SinusoidalPosEmb(nn.Module):
@@ -59,23 +58,34 @@ def get_sinusoidal_embeddings(n_waypoints, d_model):
     return pe
 
 class DiffuseLitModel(pl.LightningModule):
-    def __init__(self, model: nn.Module, scheduler: DDPMScheduler, lr: float):
+    def __init__(self, model: nn.Module, scheduler: DDIMScheduler, lr: float):
         super().__init__()
         self.model = model
         self.scheduler = scheduler 
         self.save_hyperparameters(ignore=['model', 'scheduler'])
         self.hparams.lr = lr
         
-        self.register_buffer("past_scale", torch.tensor([100.0, 20.0, 30.0, 5.0, 5.0, 5.0]))
-        self.register_buffer("future_scale", torch.tensor([100.0, 20.0]))
-        self.register_buffer("img_scale", torch.tensor([255.0]))
+        past_values = torch.load("past_normal_values.pt")
+        self.register_buffer("past_mean", past_values['mean'])
+        self.register_buffer("past_std", past_values['std'])
+
+        future_values = torch.load("future_normal_values.pt")
+        self.register_buffer("future_mean", future_values['mean'])
+        self.register_buffer("future_std", future_values['std'])
+
+
+        # self.register_buffer("past_scale", torch.tensor([100.0, 20.0, 30.0, 5.0, 5.0, 5.0]))
+        # self.register_buffer("future_scale", torch.tensor([100.0, 20.0]))
 
     def _shared_step(self, batch, stage):
         past, future, images, intent = batch['PAST'], batch['FUTURE'], batch['IMAGES'], batch['INTENT']
 
         # NORMALIZE
-        past = past / self.past_scale
-        future_norm = future / self.future_scale 
+        past = (past - self.past_mean) / self.past_std
+        past = torch.nan_to_num(past) #last pos is nan, as mean/std is 0
+        future_norm = (future - self.future_mean) / self.future_std 
+        # past = past / self.past_scale
+        # future_norm = future / self.future_scale
 
         if stage == "train":
             noise = torch.randn_like(future_norm)
@@ -91,9 +101,9 @@ class DiffuseLitModel(pl.LightningModule):
             
             pred_x0 = self.model(model_inputs, timesteps, stage)
             
-            # target = future_norm.view(future_norm.size(0), -1) # for x0
+            target = future_norm#.view(future_norm.size(0), -1) # for x0
             # target = noise.view(noise.size(0), -1) # for noise
-            target = noise
+            # target = noise
             loss = F.mse_loss(pred_x0, target)
 
         else:
@@ -102,7 +112,8 @@ class DiffuseLitModel(pl.LightningModule):
             pred_norm = self.model(model_inputs, None, stage)
             
             # Denormalize
-            pred = pred_norm.view(-1, 20, 2) * self.future_scale
+            pred = pred_norm.view(-1, 20, 2) * self.future_std + self.future_mean
+            # pred = pred_norm.view(-1, 20, 2) * self.future_scale
             loss = self.ade_loss(pred, future)
             
         self.log(f"{stage}_loss", loss, prog_bar=True)
@@ -124,7 +135,7 @@ class DiffuseLitModel(pl.LightningModule):
         return self._shared_step(batch, "val")
 
 class DiffusionLTFMonocularModel(nn.Module):
-    def __init__(self, feature_extractor, scheduler: DDPMScheduler, n_dims=256, n_layers=6):
+    def __init__(self, feature_extractor, scheduler: DDIMScheduler, n_dims=256, n_layers=6):
         super().__init__()
         self.n_dims = n_dims
         self.scheduler = scheduler 
@@ -158,11 +169,12 @@ class DiffusionLTFMonocularModel(nn.Module):
         )
 
 
-        self.predict_waypoints = nn.Linear(self.n_dims, 2)
+        self.predict_waypoints = nn.Sequential(
+            nn.Linear(self.n_dims, self.n_dims),
+            nn.ReLU(),
+            nn.Linear(self.n_dims, 2)
+        )
 
-
-        # query_input_dim = 3 + 16 * 6
-        # self.query_init = nn.Linear(query_input_dim, self.n_dims)
 
         self.n_tokens = self.features.data_config["input_size"][1] // self.features.patch_size * (self.features.data_config["input_size"][2] // self.features.patch_size)
         self.positional_encoding = nn.Parameter(nn.init.trunc_normal_(torch.zeros((1, self.n_tokens + 1 + 16, self.n_dims)), std=0.02))
@@ -219,15 +231,14 @@ class DiffusionLTFMonocularModel(nn.Module):
             device = past.device
             x_t = torch.randn(past.size(0), 20, 2, device=device)
             
-            self.scheduler.set_timesteps(self.scheduler.config.num_train_timesteps, device=device)
+
+            self.scheduler.set_timesteps(40, device=device)
 
             for t_step in self.scheduler.timesteps:
-                timesteps_batch = torch.full((past.size(0),), t_step, device=device, dtype=torch.long)
-                t_emb = self.time_embed(timesteps_batch)
-                
                 # Predict noise or x0 (depending on sampling strategy)
                 future = self.future_project(x_t) + self.future_embeddings.to(past.device) + self.time_embed(t_step).unsqueeze(1)
                 future = self.encoder_mlp_1(future)
+                
                 future_atten = future
                 for block in self.encoder_selfattention:
                     future_atten = block(future_atten, future_atten)
@@ -247,7 +258,7 @@ class DiffusionLTFMonocularModel(nn.Module):
 
 
 class DiffusionMonocularModel(nn.Module):
-    def __init__(self, feature_extractor, scheduler: DDPMScheduler, out_dim, n_layers=3):
+    def __init__(self, feature_extractor, scheduler: DDIMScheduler, out_dim, n_layers=3):
         super().__init__()
         self.features = feature_extractor
         self.features.eval()
@@ -342,10 +353,10 @@ if __name__ == "__main__":
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=8, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
     val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=8, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
 
-    scheduler = DDPMScheduler(
+    scheduler = DDIMScheduler(
         num_train_timesteps=1000,
         beta_schedule="squaredcos_cap_v2",
-        prediction_type="epsilon", # sample or epsilon for x0 or noise
+        prediction_type="sample", # sample or epsilon for x0 or noise
         clip_sample=False
     )
 
@@ -364,6 +375,7 @@ if __name__ == "__main__":
         max_epochs=args.max_epochs,
         logger=CSVLogger(base_path + "/logs", name=f"camera_e2e_{datetime.now().strftime('%Y%m%d_%H%M')}"),
         precision="bf16-mixed",
+        gradient_clip_val=1.0,
         callbacks=[
             ModelCheckpoint(monitor='val_loss', mode='min', save_top_k=1, 
                             dirpath=base_path + '/checkpoints', 

@@ -38,6 +38,12 @@ slurm-10252021 - VAE (hidden_dim=128, latent_dim=12, num_layers=3)
 slurm-10252031 - Epsilon Diffusion w/ 1 layer
 
 slurm-10252564 - DiffusionLTF 
+slurm-10255646 - DiffusionLTF: Bigger Trajectory + Fixed input image scaling 225
+
+slurm-10255648 - DDIM added
+slurm-10255650 - Better normalization (z-score instead of constant scaling)
+
+slurm-10255654 - added gradient clipping to try and cure unstable training
 
 Better diffusions
 

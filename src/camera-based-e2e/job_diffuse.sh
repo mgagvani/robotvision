@@ -1,7 +1,7 @@
 #!/bin/bash
 
 
-#SBATCH --time=010:00:00
+#SBATCH --time=07:00:00
 #SBATCH --partition=v100
 #SBATCH --account=csso
 #SBATCH --gres=gpu:1
