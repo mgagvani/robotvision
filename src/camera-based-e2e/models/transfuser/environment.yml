@@ -1,0 +1,13 @@
+name: tfuse
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - ca-certificates
+  - freetype
+  - libpng
+  - libtiff
+  - python=3.7
+  - pip
+  - pip:
+    - -r team_code_transfuser/requirements.txt
