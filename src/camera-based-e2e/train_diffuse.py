@@ -65,27 +65,27 @@ class DiffuseLitModel(pl.LightningModule):
         self.save_hyperparameters(ignore=['model', 'scheduler'])
         self.hparams.lr = lr
         
-        past_values = torch.load("past_normal_values.pt")
-        self.register_buffer("past_mean", past_values['mean'])
-        self.register_buffer("past_std", past_values['std'])
+        # past_values = torch.load("past_normal_values.pt")
+        # self.register_buffer("past_mean", past_values['mean'])
+        # self.register_buffer("past_std", past_values['std'])
 
-        future_values = torch.load("future_normal_values.pt")
-        self.register_buffer("future_mean", future_values['mean'])
-        self.register_buffer("future_std", future_values['std'])
+        # future_values = torch.load("future_normal_values.pt")
+        # self.register_buffer("future_mean", future_values['mean'])
+        # self.register_buffer("future_std", future_values['std'])
 
 
-        # self.register_buffer("past_scale", torch.tensor([100.0, 20.0, 30.0, 5.0, 5.0, 5.0]))
-        # self.register_buffer("future_scale", torch.tensor([100.0, 20.0]))
+        self.register_buffer("past_scale", torch.tensor([100.0, 20.0, 30.0, 5.0, 5.0, 5.0]))
+        self.register_buffer("future_scale", torch.tensor([100.0, 20.0]))
 
     def _shared_step(self, batch, stage):
         past, future, images, intent = batch['PAST'], batch['FUTURE'], batch['IMAGES'], batch['INTENT']
 
         # NORMALIZE
-        past = (past - self.past_mean) / self.past_std
-        past = torch.nan_to_num(past) #last pos is nan, as mean/std is 0
-        future_norm = (future - self.future_mean) / self.future_std 
-        # past = past / self.past_scale
-        # future_norm = future / self.future_scale
+        # past = (past - self.past_mean) / self.past_std
+        # past = torch.nan_to_num(past) #last pos is nan, as mean/std is 0
+        # future_norm = (future - self.future_mean) / self.future_std 
+        past = past / self.past_scale
+        future_norm = future / self.future_scale
 
         if stage == "train":
             noise = torch.randn_like(future_norm)
@@ -112,8 +112,8 @@ class DiffuseLitModel(pl.LightningModule):
             pred_norm = self.model(model_inputs, None, stage)
             
             # Denormalize
-            pred = pred_norm.view(-1, 20, 2) * self.future_std + self.future_mean
-            # pred = pred_norm.view(-1, 20, 2) * self.future_scale
+            # pred = pred_norm.view(-1, 20, 2) * self.future_std + self.future_mean
+            pred = pred_norm.view(-1, 20, 2) * self.future_scale
             loss = self.ade_loss(pred, future)
             
         self.log(f"{stage}_loss", loss, prog_bar=True)
@@ -166,6 +166,12 @@ class DiffusionLTFMonocularModel(nn.Module):
             nn.Linear(self.n_dims, self.n_dims),
             nn.ReLU(),
             nn.Linear(self.n_dims, self.n_dims),
+        )
+
+        self.scorer = nn.Sequential(
+            nn.Linear(self.n_dims*20, self.n_dims),
+            nn.ReLU(),
+            nn.Linear(self.n_dims, 1)
         )
 
 
@@ -232,7 +238,7 @@ class DiffusionLTFMonocularModel(nn.Module):
             x_t = torch.randn(past.size(0), 20, 2, device=device)
             
 
-            self.scheduler.set_timesteps(40, device=device)
+            self.scheduler.set_timesteps(50, device=device)
 
             for t_step in self.scheduler.timesteps:
                 # Predict noise or x0 (depending on sampling strategy)
@@ -251,7 +257,7 @@ class DiffusionLTFMonocularModel(nn.Module):
                 
                 pred_original_sample = self.predict_waypoints(query)
                 
-                step_output = self.scheduler.step(model_output=pred_original_sample, timestep=t_step, sample=x_t)
+                step_output = self.scheduler.step(model_output=pred_original_sample, timestep=t_step, sample=x_t) # as much as I hate AI, I use it quite a bit.
                 x_t = step_output.prev_sample
             
             return x_t 

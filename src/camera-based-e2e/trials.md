@@ -41,9 +41,12 @@ slurm-10252564 - DiffusionLTF
 slurm-10255646 - DiffusionLTF: Bigger Trajectory + Fixed input image scaling 225
 
 slurm-10255648 - DDIM added
-slurm-10255650 - Better normalization (z-score instead of constant scaling)
+
+Failed: slurm-10255650 - Better normalization (z-score instead of constant scaling)
 
 slurm-10255654 - added gradient clipping to try and cure unstable training
+
+slurm-10256101 - Removed better normalization
 
 Better diffusions
 
