@@ -126,21 +126,8 @@ class LitModel(pl.LightningModule):
 
         # Scorer Losses -> encourage ranking of predicted scores to match true ranking of ades that are generated
         if k_modes > 1 and pred_scores is not None:
-            ade = ade_per_mode.detach()               # (B,K)
-            k = 10
-            tau = 0.5
-
-            # mask everything except true top-k modes
-            topk = ade.topk(k, largest=False, dim=1)
-            mask = torch.full_like(ade, float('-inf'))
-            mask.scatter_(1, topk.indices, 0.0)
-
-            rank_distribution = torch.softmax((-ade / tau) + mask, dim=1)
-
-            # if pred_scores is "lower is better", use -pred_scores as logits
-            p_log = torch.log_softmax((-pred_scores / tau) + mask, dim=1)
-
-            loss_score = (rank_distribution * (torch.log(rank_distribution + 1e-9) - p_log)).sum(dim=1).mean()
+            ade = ade_per_mode.detach()  # (B, K)
+            loss_score = F.mse_loss(pred_scores, ade)
             pred_idx = pred_scores.argmin(dim=1)
             ade_pred = ade_per_mode[torch.arange(pred.size(0), device=pred.device), pred_idx].mean()
         else:
