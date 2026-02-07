@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from matplotlib import pyplot as plt
 import pandas as pd
+import random
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -15,6 +16,7 @@ from pytorch_lightning.loggers import CSVLogger
 
 from diffusers import DDIMScheduler
 from diffusers.models.embeddings import Timesteps
+import numpy as np
 
 from loader import WaymoE2E
 from models.base_model import LitModel, collate_with_images
@@ -57,6 +59,44 @@ def get_sinusoidal_embeddings(n_waypoints, d_model):
     
     return pe
 
+def generate_anchors(num):
+    dt = 0.25
+    steps = 20
+    anchors = []
+    t = np.linspace(0, steps * dt, steps)
+    
+    p1 = np.column_stack((t * 0.5, np.zeros_like(t)))
+    
+    p2 = np.column_stack((t * 10, np.zeros_like(t)))
+    
+    p3 = np.column_stack((t * 20, np.zeros_like(t)))
+    
+    R_gentle = 100
+    v = 15
+    theta = (v * t) / R_gentle
+    p4 = np.column_stack((R_gentle * np.sin(theta), R_gentle * (1 - np.cos(theta))))
+    
+    R_hard = 15
+    v = 8
+    theta = (v * t) / R_hard
+    p5 = np.column_stack((R_hard * np.sin(theta), R_hard * (1 - np.cos(theta))))
+
+    p6 = p4.copy()
+    p6[:, 1] *= -1
+    
+    p7 = p5.copy()
+    p7[:, 1] *= -1
+
+    lateral_shift = 4.0
+    x_lc = t * 15
+    y_lc = lateral_shift / (1 + np.exp(-0.2 * (x_lc - 20)))
+    p8 = np.column_stack((x_lc, y_lc))
+
+    p9 = p8.copy()
+    p9[:, 1] *= -1
+    
+    anchors = random.choices([p1, p2, p3, p4, p5, p6, p7, p8, p9], k=num)
+    return torch.tensor(anchors)
 
 class DiffuseLitModel(pl.LightningModule):
     def __init__(self, model: nn.Module, scheduler: DDIMScheduler, lr: float, n_traj):
@@ -90,7 +130,9 @@ class DiffuseLitModel(pl.LightningModule):
         future_norm = future / self.future_scale
 
         if stage == "train":
-            noise = torch.randn(future.size(0), 2, 20, 2, device=past.device)
+            noise = torch.randn(future.size(0), 2, 20, 2, device=past.device)*0.2
+            noise = noise + generate_anchors(2).to(past.device, dtype=noise.dtype)/self.future_scale
+            
             bs = future_norm.shape[0]
 
             timesteps = torch.randint(
@@ -138,15 +180,17 @@ class DiffuseLitModel(pl.LightningModule):
         return self._shared_step(batch, "val")
 
 class DiffusionLTFMonocularModel(nn.Module):
-    def __init__(self, feature_extractor, scheduler: DDIMScheduler, n_dims=256, n_layers=6):
+    def __init__(self, feature_extractor, scheduler: DDIMScheduler, n_dims=256, n_traj=5, n_layers=6):
         super().__init__()
         self.n_dims = n_dims
         self.scheduler = scheduler 
+        self.n_traj = n_traj
 
         self.features = feature_extractor
         self.features.eval()
         self.feature_dim = sum(self.features.dims)
         self.scale_features = nn.Linear(self.feature_dim, self.n_dims)
+        self.register_buffer("future_scale", torch.tensor([100.0, 20.0]))
 
 
         self.intent_embed = nn.Embedding(3, self.n_dims) # embed the different intents
@@ -253,8 +297,12 @@ class DiffusionLTFMonocularModel(nn.Module):
         else:
             device = past.device
             
-            x_t = torch.randn(past.size(0), 20, 2, device=device)
-            
+            context = context.repeat_interleave(self.n_traj, dim=0)
+
+            x_t = torch.randn(past.size(0),self.n_traj, 20, 2, device=device)*0.2
+            x_t = x_t + generate_anchors(self.n_traj).to(device, dtype=x_t.dtype)/self.future_scale
+            x_t = x_t.view(context.size(0), 20, 2)
+
             save_query= None
 
             self.scheduler.set_timesteps(50, device=device)
@@ -279,14 +327,11 @@ class DiffusionLTFMonocularModel(nn.Module):
                 x_t = step_output.prev_sample
             
 
-            scores = self.scorer(save_query.view(past.size(0), -1))
+            scores = self.scorer(save_query.view(x_t.size(0), -1))
             x_t = x_t.view(past.size(0), -1, 20, 2)
             scores = scores.view(past.size(0), -1, 1)
 
-            # print(scores.shape)
             max_indices = torch.argmax(scores, dim=1)
-            # print(max_indices.shape)
-            # print(max_indices)
             index_reshaped = max_indices.view(past.size(0), 1, 1, 1).expand(past.size(0), 1, 20, 2)
             predicted_x_t = torch.gather(x_t, 1, index_reshaped)
 
