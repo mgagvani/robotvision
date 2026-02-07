@@ -57,13 +57,15 @@ def get_sinusoidal_embeddings(n_waypoints, d_model):
     
     return pe
 
+
 class DiffuseLitModel(pl.LightningModule):
-    def __init__(self, model: nn.Module, scheduler: DDIMScheduler, lr: float):
+    def __init__(self, model: nn.Module, scheduler: DDIMScheduler, lr: float, n_traj):
         super().__init__()
         self.model = model
         self.scheduler = scheduler 
         self.save_hyperparameters(ignore=['model', 'scheduler'])
         self.hparams.lr = lr
+        self.n_traj = n_traj
         
         # past_values = torch.load("past_normal_values.pt")
         # self.register_buffer("past_mean", past_values['mean'])
@@ -88,14 +90,15 @@ class DiffuseLitModel(pl.LightningModule):
         future_norm = future / self.future_scale
 
         if stage == "train":
-            noise = torch.randn_like(future_norm)
+            noise = torch.randn(future.size(0), 2, 20, 2, device=past.device)
             bs = future_norm.shape[0]
 
             timesteps = torch.randint(
                 0, self.scheduler.config.num_train_timesteps, (bs,), device=self.device
             ).long()
             
-            future_noisy = self.scheduler.add_noise(future_norm, noise, timesteps)
+
+            future_noisy = self.scheduler.add_noise(future_norm.unsqueeze(1).expand(-1, 2, -1, -1), noise, timesteps)
             
             model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent, 'FUTURE': future_noisy}
             
@@ -222,24 +225,39 @@ class DiffusionLTFMonocularModel(nn.Module):
         context = torch.cat([tokens, past_tokens, intent_token], dim=1) + self.positional_encoding
 
         if stage == "train":
-            future = self.future_project(future) + self.future_embeddings.to(past.device) + self.time_embed(t).unsqueeze(1)
-            future = self.encoder_mlp_1(future)
-            future_atten = future
-            for block in self.encoder_selfattention:
-                future_atten = block(future_atten, future_atten)
-            query = self.encoder_mlp_2(future + future_atten)
-            
-            for block in self.decoder_blocks:
-                query = block(query, context)
+            future_l, future_r = torch.unbind(future, dim=1)
+            waypoints = []
+            scores = []
+            for future in [future_l, future_r]:
+                future = self.future_project(future) + self.future_embeddings.to(past.device) + self.time_embed(t).unsqueeze(1)
+                future = self.encoder_mlp_1(future)
+                future_atten = future
+                for block in self.encoder_selfattention:
+                    future_atten = block(future_atten, future_atten)
+                query = self.encoder_mlp_2(future + future_atten)
+                
+                for block in self.decoder_blocks:
+                    query = block(query, context)
 
-            return self.predict_waypoints(query.squeeze(1))
+
+                waypoints.append(self.predict_waypoints(query.squeeze(1)))
+                scores.append(self.scorer(query.view(past.size(0), -1)))
+
+            scores = torch.stack(scores)
+            waypoints = torch.stack(waypoints)
+
+            scores = torch.softmax(scores, dim=0)
+            waypoints = (waypoints * scores.unsqueeze(-1)).sum(dim=0)
+            
+            return waypoints
         else:
             device = past.device
+            
             x_t = torch.randn(past.size(0), 20, 2, device=device)
             
+            save_query= None
 
             self.scheduler.set_timesteps(50, device=device)
-
             for t_step in self.scheduler.timesteps:
                 # Predict noise or x0 (depending on sampling strategy)
                 future = self.future_project(x_t) + self.future_embeddings.to(past.device) + self.time_embed(t_step).unsqueeze(1)
@@ -256,11 +274,23 @@ class DiffusionLTFMonocularModel(nn.Module):
 
                 
                 pred_original_sample = self.predict_waypoints(query)
-                
-                step_output = self.scheduler.step(model_output=pred_original_sample, timestep=t_step, sample=x_t) # as much as I hate AI, I use it quite a bit.
+                save_query = query
+                step_output = self.scheduler.step(model_output=pred_original_sample, timestep=t_step, sample=x_t)
                 x_t = step_output.prev_sample
             
-            return x_t 
+
+            scores = self.scorer(save_query.view(past.size(0), -1))
+            x_t = x_t.view(past.size(0), -1, 20, 2)
+            scores = scores.view(past.size(0), -1, 1)
+
+            # print(scores.shape)
+            max_indices = torch.argmax(scores, dim=1)
+            # print(max_indices.shape)
+            # print(max_indices)
+            index_reshaped = max_indices.view(past.size(0), 1, 1, 1).expand(past.size(0), 1, 20, 2)
+            predicted_x_t = torch.gather(x_t, 1, index_reshaped)
+
+            return predicted_x_t 
 
 
 class DiffusionMonocularModel(nn.Module):
@@ -349,15 +379,15 @@ if __name__ == "__main__":
     parser.add_argument('--data_dir', type=str, required=True, help='Path to Waymo E2E data directory')
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--max_epochs', type=int, default=4, help='Number of epochs to train')
+    parser.add_argument('--max_epochs', type=int, default=2, help='Number of epochs to train')
     args = parser.parse_args()
 
     # Data 
     train_dataset = WaymoE2E(indexFile='index_train.pkl', data_dir=args.data_dir, images=True, n_items=250000)
     test_dataset = WaymoE2E(indexFile='index_val.pkl', data_dir=args.data_dir, images=True, n_items=500)
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=8, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
-    val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=8, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=1, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
+    val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=1, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
 
     scheduler = DDIMScheduler(
         num_train_timesteps=1000,
@@ -374,14 +404,14 @@ if __name__ == "__main__":
         scheduler=scheduler,
     )
     
-    lit_model = DiffuseLitModel(model=model, scheduler=scheduler, lr=args.lr)
+    lit_model = DiffuseLitModel(model=model, scheduler=scheduler, lr=args.lr, n_traj=5)
 
     base_path = Path(args.data_dir).parent.as_posix()
     trainer = pl.Trainer(
         max_epochs=args.max_epochs,
         logger=CSVLogger(base_path + "/logs", name=f"camera_e2e_{datetime.now().strftime('%Y%m%d_%H%M')}"),
         precision="bf16-mixed",
-        gradient_clip_val=1.0,
+        # gradient_clip_val=1.0,
         callbacks=[
             ModelCheckpoint(monitor='val_loss', mode='min', save_top_k=1, 
                             dirpath=base_path + '/checkpoints', 

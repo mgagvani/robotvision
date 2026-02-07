@@ -1,8 +1,8 @@
 #!/bin/bash
 
 
-#SBATCH --time=05:00:00
-#SBATCH --partition=v100
+#SBATCH --time=06:00:00
+#SBATCH --partition=a10
 #SBATCH --account=csso
 #SBATCH --gres=gpu:1
 #SBATCH --mem=64G

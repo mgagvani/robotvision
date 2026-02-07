@@ -48,12 +48,8 @@ slurm-10255654 - added gradient clipping to try and cure unstable training
 
 slurm-10256101 - Removed better normalization
 
-Better diffusions
+slurm-10256101 - Longer run w/ more val
 
+slurm-10263254 - Multi-Trajectories
 
-Try:
-VAE w/ fully normalized input data
-Diffusion w/ fully normalized input data
-VAE Dense w/ above VAE
-
-Create VAE fine-tunning
+- Discrete Gaussian noise anchor
