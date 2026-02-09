@@ -84,10 +84,53 @@ class LitModel(pl.LightningModule):
 
         pred_future = self.forward(model_inputs)  # (B, T*2)
         pred_depth = None
+        pred_scores: torch.Tensor = None
         if isinstance(pred_future, dict):
-            pred_future, pred_depth = pred_future["trajectory"], pred_future.get("depth", None)
+            pred_future, pred_depth, pred_scores = pred_future["trajectory"], pred_future.get("depth", None), pred_future.get("scores", None)
 
-        loss_ade = self.ade_loss(pred_future.reshape_as(future), future)  # reshape to (B, T, 2)
+        pred = pred_future
+        t_steps = future.shape[1]
+        t2 = t_steps * 2
+        k_modes = self.model.n_proposals if hasattr(self.model, "n_proposals") else 1
+
+        if pred.ndim != 2:
+            raise ValueError(f"Unexpected pred shape {pred.shape}; expected (B, T*2) or (B, {k_modes}*T*2).")
+
+        if pred.shape[1] == t2:
+            pred = pred.view(pred.size(0), 1, t_steps, 2)
+        elif pred.shape[1] == k_modes * t2:
+            pred = pred.view(pred.size(0), k_modes, t_steps, 2)
+        else:
+            raise ValueError(f"Unexpected pred shape {pred.shape}; expected (B, T*2) or (B, {k_modes}*T*2).")
+
+        # ADE per mode: (B, K)
+        dist = torch.norm(pred - future[:, torch.newaxis, :, :], dim=-1)  # (B, K, T)
+        ade_per_mode = dist.mean(dim=-1)
+
+        # Top-M WTA for trajectory loss. Here, we have an "oracle" that picks the best mode
+        # so, our loss is calculated on the mean of the top 5 trajectories.
+        top_m = min(5, ade_per_mode.size(1))
+        loss_ade = ade_per_mode.topk(top_m, largest=False, dim=1).values.mean()
+
+        # oracle ade is best of all proposals, since we have the GT data during training
+        oracle_ade = ade_per_mode.min(dim=1).values.mean()
+        ade_pred = None
+        # pred_scores is now the predicted ADE of each trajectory
+        if pred_scores is not None and k_modes > 1:
+            pred_idx = pred_scores.argmin(dim=1)
+            ade_pred = ade_per_mode[torch.arange(pred.size(0), device=pred.device), pred_idx].mean()
+        elif k_modes == 1:
+            ade_pred = ade_per_mode.squeeze(1).mean()
+        regret = (ade_pred - oracle_ade) if ade_pred is not None else None
+
+        # Scorer Losses -> encourage ranking of predicted scores to match true ranking of ades that are generated
+        if k_modes > 1 and pred_scores is not None:
+            ade = ade_per_mode.detach()  # (B, K)
+            loss_score = F.mse_loss(pred_scores, ade)
+            pred_idx = pred_scores.argmin(dim=1)
+            ade_pred = ade_per_mode[torch.arange(pred.size(0), device=pred.device), pred_idx].mean()
+        else:
+            loss_score = torch.tensor(0.0, device=self.device)
 
         # Depth Loss
         if pred_depth is not None:
@@ -97,17 +140,24 @@ class LitModel(pl.LightningModule):
         else:
             loss_depth = torch.tensor(0.0, device=self.device)
 
-        loss_depth *= 0.0 # disabled
+        loss_depth *= 0.1 # slightly enabled
         loss_ade *= 1.0 # TODO: tune loss terms
-
+        loss_score *= 1.0
+        total_loss = loss_ade + loss_depth + loss_score
         # TODO: improve logging both to disk and to console
-        self.log_dict({
+        log_payload = {
             f"{stage}_loss_ade": loss_ade,
+            f"{stage}_loss_score": loss_score,
             f"{stage}_loss_depth": loss_depth,
-            f"{stage}_loss": loss_ade + loss_depth,
-        }, prog_bar=True, logger=True)
+            f"{stage}_loss": total_loss,
+        }
+        if ade_pred is not None:
+            log_payload[f"{stage}_ade_pred"] = ade_pred
+            log_payload[f"{stage}_ade_oracle"] = oracle_ade
+            log_payload[f"{stage}_ade_regret"] = regret
+        self.log_dict(log_payload, prog_bar=True, logger=True)
 
-        return loss_ade + loss_depth
+        return total_loss
     
     def training_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, "train")
@@ -131,4 +181,3 @@ def collate_with_images(batch):
         "IMAGES": images,
         "NAME": names,
     }
-
