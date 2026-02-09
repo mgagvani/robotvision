@@ -141,7 +141,7 @@ class LitModel(pl.LightningModule):
         else:
             loss_depth = torch.tensor(0.0, device=self.device)
 
-        loss_depth *= 0.0 # disabled
+        loss_depth *= 0.1 # slightly enabled
         loss_ade *= 1.0 # TODO: tune loss terms
         loss_score *= 1.0
         total_loss = loss_ade + loss_depth + loss_score
