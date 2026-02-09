@@ -215,9 +215,9 @@ class DeepMonocularModel(nn.Module):
         traj_pred = traj_xy.reshape(traj_xy.size(0), -1)  # (B, K*T*2)
 
         traj_pred_flat = traj_xy.reshape(traj_xy.size(0), self.n_proposals, -1)  # (B, K, T*2)
-        traj_feat: torch.Tensor = self.traj_features(traj_pred_flat)  # (B, K, C)
+        traj_feat: torch.Tensor = self.traj_features(traj_pred_flat.detach())  # (B, K, C)
         query_for_score = query.squeeze(1).detach()[:, torch.newaxis, :].expand(-1, self.n_proposals, -1)  # (B, K, C)
-        score_in = torch.cat([query_for_score, traj_feat.detach()], dim=-1)  # (B, K, 2C)
+        score_in = torch.cat([query_for_score, traj_feat], dim=-1)  # (B, K, 2C)
         score_pred = self.score_decoder(score_in).squeeze(-1)  # (B, K)
 
         return {
