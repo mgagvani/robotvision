@@ -106,7 +106,6 @@ class LitModel(pl.LightningModule):
         # ADE per mode: (B, K)
         dist = torch.norm(pred - future[:, torch.newaxis, :, :], dim=-1)  # (B, K, T)
         ade_per_mode = dist.mean(dim=-1)
-        best_idx = ade_per_mode.argmin(dim=1)
 
         # Top-M WTA for trajectory loss. Here, we have an "oracle" that picks the best mode
         # so, our loss is calculated on the mean of the top 5 trajectories.

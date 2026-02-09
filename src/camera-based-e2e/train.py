@@ -26,6 +26,7 @@ if __name__ == "__main__":
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--max_epochs', type=int, default=10, help='Number of epochs to train')
     parser.add_argument('--compile', action='store_true', help='Whether to compile the model with torch.compile')
+    parser.add_argument('--profile', action='store_true', help='Whether to run the profiler')
     args = parser.parse_args()
 
     # Data 
@@ -57,7 +58,7 @@ if __name__ == "__main__":
         strategy=strategy,
         precision="bf16-mixed" if torch.cuda.is_bf16_supported() else 16,
         log_every_n_steps=10,
-        profiler=SimpleProfiler(extended=True),
+        profiler=SimpleProfiler(extended=True) if args.profile else None,
         callbacks=[
             ModelCheckpoint(monitor='val_loss',
                              mode='min', 

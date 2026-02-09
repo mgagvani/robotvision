@@ -92,7 +92,7 @@ def generate_submission_data(
             if pred_scores is None:
                 raise ValueError("DeepMonocularModel must output scores")
             else:
-                best_idx = F.softmax(pred_scores, dim=1).argmax(dim=1)  # (B,)
+                best_idx = pred_scores.argmin(dim=1)  # (B,)
 
             pred_future = pred_futures[torch.arange(pred_futures.size(0)), best_idx, :]  # (B, 40)
 
