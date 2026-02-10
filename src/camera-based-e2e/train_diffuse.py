@@ -96,8 +96,8 @@ class DiffuseLitModel(pl.LightningModule):
         past = past / self.past_scale
         future_norm = future / self.future_scale
 
-        noise = torch.randn(future.size(0), 20, 2, device=past.device)
         if stage == "train":
+            noise = torch.randn(future.size(0), 20, 2, device=past.device)
             noise = noise + self.generate_anchors(1).to(past.device, dtype=noise.dtype)/self.future_scale
             
             bs = future_norm.shape[0]
@@ -128,7 +128,10 @@ class DiffuseLitModel(pl.LightningModule):
 
         else:
             anchors = self.generate_anchors(self.n_traj).to(past.device, dtype=past.dtype)/self.future_scale
-            model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent, 'FUTURE': anchors}
+            noise = torch.randn(past.size(0),self.n_traj, 20, 2, device=past.device)
+            noisy_anchors = noise + anchors.to(past.device, dtype=noise.dtype) / self.future_scale
+            
+            model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent, 'FUTURE': noisy_anchors}
             
             pred_norm = self.model(model_inputs, None, stage)
             
@@ -162,25 +165,32 @@ class DiffusionLTFMonocularModel(nn.Module):
         self.scheduler = scheduler 
         self.n_traj = n_traj
 
+        # Feature extractor
+        self.n_tokens = self.features.data_config["input_size"][1] // self.features.patch_size * (self.features.data_config["input_size"][2] // self.features.patch_size)
         self.features = feature_extractor
         self.features.eval()
         self.feature_dim = sum(self.features.dims)
+
+        # Context projecting/embeddings
         self.scale_features = nn.Linear(self.feature_dim, self.n_dims)
-        self.register_buffer("future_scale", torch.tensor([160.0, 50.0]))
-
-
         self.intent_embed = nn.Embedding(3, self.n_dims) # embed the different intents
-
-        self.future_embeddings = get_sinusoidal_embeddings(20, self.n_dims)
         self.past_projection = nn.Linear(6, self.n_dims) # convert past waypoints to tokens
+        self.positional_encoding = nn.Parameter(nn.init.trunc_normal_(torch.zeros((1, self.n_tokens + 1 + 16, self.n_dims)), std=0.02))
 
+        # Future Query encoder
+        self.time_embed = nn.Sequential(
+            SinusoidalPosEmb(self.n_dims),
+            nn.Linear(self.n_dims, self.n_dims * 4),
+            nn.SiLU(),
+            nn.Linear(self.n_dims * 4, self.n_dims)
+        )
+        self.future_embeddings = get_sinusoidal_embeddings(20, self.n_dims)
         self.future_project = nn.Linear(2, self.n_dims)
         self.encoder_mlp_1 = nn.Sequential(
             nn.Linear(self.n_dims, self.n_dims),
             nn.ReLU(),
             nn.Linear(self.n_dims, self.n_dims),
             ) # should be an encoder
-        
         self.encoder_selfattention = nn.ModuleList([
             TransformerBlock(self.n_dims, num_heads=8, mlp_dim=self.feature_dim*4)
             for _ in range(2)
@@ -191,6 +201,13 @@ class DiffusionLTFMonocularModel(nn.Module):
             nn.Linear(self.n_dims, self.n_dims),
         )
 
+        # CA between queries and context
+        self.decoder_blocks = nn.ModuleList([
+            TransformerBlock(self.n_dims, num_heads=8, mlp_dim=self.feature_dim*4)
+            for _ in range(6)
+        ])
+
+        # Scoring output from 
         self.scorer = nn.Sequential(
             nn.Linear(self.n_dims*20, self.n_dims),
             nn.ReLU(),
@@ -199,29 +216,12 @@ class DiffusionLTFMonocularModel(nn.Module):
             nn.Linear(self.n_dims, 1)
         )
 
-
+        # Predict output waypoints
         self.predict_waypoints = nn.Sequential(
             nn.Linear(self.n_dims, self.n_dims),
             nn.ReLU(),
             nn.Linear(self.n_dims, 2)
         )
-
-
-        self.n_tokens = self.features.data_config["input_size"][1] // self.features.patch_size * (self.features.data_config["input_size"][2] // self.features.patch_size)
-        self.positional_encoding = nn.Parameter(nn.init.trunc_normal_(torch.zeros((1, self.n_tokens + 1 + 16, self.n_dims)), std=0.02))
-
-        self.time_embed = nn.Sequential(
-            SinusoidalPosEmb(self.n_dims),
-            nn.Linear(self.n_dims, self.n_dims * 4),
-            nn.SiLU(),
-            nn.Linear(self.n_dims * 4, self.n_dims)
-        )
-        
-
-        self.decoder_blocks = nn.ModuleList([
-            TransformerBlock(self.n_dims, num_heads=8, mlp_dim=self.feature_dim*4)
-            for _ in range(6)
-        ])
 
 
     def forward(self, x, t, stage):
@@ -261,9 +261,8 @@ class DiffusionLTFMonocularModel(nn.Module):
             
             context = context.repeat_interleave(self.n_traj, dim=0)
 
-            x_t = torch.randn(past.size(0),self.n_traj, 20, 2, device=device)
-            x_t = x_t + future.to(device, dtype=x_t.dtype) / self.future_scale
-            x_t = x_t.view(context.size(0), 20, 2)
+            
+            x_t = future.view(context.size(0), 20, 2)
 
             save_query= None
 
