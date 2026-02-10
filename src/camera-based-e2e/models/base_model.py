@@ -102,6 +102,26 @@ class LitModel(pl.LightningModule):
         # normalized loss
         loss = 1.0 - score
         return loss.mean()
+
+    def _prepare_rfs_inputs(self, past, future, model_inputs):
+        speed = torch.norm(past[..., 2:4], dim=-1)[:, -1]  # (B,), speed at last observed time step
+
+        pred_future = self.forward(model_inputs)  # (B, T*2)
+        pred_future = pred_future.reshape_as(future)  # (B, T, 2)
+
+        # compute direction vectors based on ground truth future trajectory
+        full_lng_dir, full_lat_dir = self.compute_direction(future)
+        indices = [11, 19]  # 3s and 5s into the future
+
+        pred_slice = pred_future[:, indices, :]
+        gt_slice = future[:, indices, :]
+        lng_dir_slice = full_lng_dir[:, indices, :]
+        lat_dir_slice = full_lat_dir[:, indices, :]
+
+        # batch time indices for the selected 3s and 5s targets
+        t_idx = torch.tensor([3.0, 5.0], device=future.device).unsqueeze(0).expand(future.size(0), -1)  # (B, 2)
+
+        return pred_future, pred_slice, gt_slice, lng_dir_slice, lat_dir_slice, speed, t_idx
     
     # ---- optimizers ----
     def configure_optimizers(self):
@@ -122,23 +142,11 @@ class LitModel(pl.LightningModule):
         # create all input data that we are allowed to give to a model
         model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent}
 
-        speed = torch.norm(past[..., 2:4], dim=-1)[:, -1]  # (B,), speed at last observed time step
-
-        pred_future = self.forward(model_inputs)  # (B, T*2)
-        pred_future = pred_future.reshape_as(future)  # (B, T, 2)
-
-        #compute direction vectors based on ground truth future trajectory
-        full_lng_dir, full_lat_dir = self.compute_direction(future)
-
-        indices = [11, 19]  # 3s and 5s into the future
-
-        pred_slice = pred_future[:, indices, :]
-        gt_slice = future[:, indices, :]
-        lng_dir_slice = full_lng_dir[:, indices, :]
-        lat_dir_slice = full_lat_dir[:, indices, :]
-
-        #create a batch of time indices from 1 to 20
-        t_idx = torch.tensor([3.0, 5.0], device=future.device).unsqueeze(0).expand(future.size(0), -1) # (B, 2)
+        pred_future, pred_slice, gt_slice, lng_dir_slice, lat_dir_slice, speed, t_idx = self._prepare_rfs_inputs(
+            past,
+            future,
+            model_inputs,
+        )
 
         rfs_loss = self.rfs_loss(pred_slice, gt_slice, lng_dir_slice, lat_dir_slice, speed, t_idx) 
         rfs_weight = 0.0
