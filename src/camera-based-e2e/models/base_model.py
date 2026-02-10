@@ -141,6 +141,8 @@ class LitModel(pl.LightningModule):
         t_idx = torch.tensor([3.0, 5.0], device=future.device).unsqueeze(0).expand(future.size(0), -1) # (B, 2)
 
         rfs_loss = self.rfs_loss(pred_slice, gt_slice, lng_dir_slice, lat_dir_slice, speed, t_idx) 
+        rfs_weight = 0.0
+        rfs_loss *= rfs_weight
         
         ade_loss = self.ade_loss(pred_future, future)
         # TODO: improve logging both to disk and to console
@@ -150,9 +152,9 @@ class LitModel(pl.LightningModule):
             f"{stage}_loss": (ade_loss + rfs_loss),
         }, prog_bar=True, logger=True)
 
-        rfs_weight = 0.0
+        
 
-        return (ade_loss + rfs_weight * rfs_loss)
+        return (ade_loss + rfs_loss)
     
     def training_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, "train")
