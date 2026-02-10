@@ -59,44 +59,7 @@ def get_sinusoidal_embeddings(n_waypoints, d_model):
     
     return pe
 
-def generate_anchors(num):
-    dt = 0.25
-    steps = 20
-    anchors = []
-    t = np.linspace(0, steps * dt, steps)
-    
-    p1 = np.column_stack((t * 0.5, np.zeros_like(t)))
-    
-    p2 = np.column_stack((t * 10, np.zeros_like(t)))
-    
-    p3 = np.column_stack((t * 20, np.zeros_like(t)))
-    
-    R_gentle = 100
-    v = 15
-    theta = (v * t) / R_gentle
-    p4 = np.column_stack((R_gentle * np.sin(theta), R_gentle * (1 - np.cos(theta))))
-    
-    R_hard = 15
-    v = 8
-    theta = (v * t) / R_hard
-    p5 = np.column_stack((R_hard * np.sin(theta), R_hard * (1 - np.cos(theta))))
 
-    p6 = p4.copy()
-    p6[:, 1] *= -1
-    
-    p7 = p5.copy()
-    p7[:, 1] *= -1
-
-    lateral_shift = 4.0
-    x_lc = t * 15
-    y_lc = lateral_shift / (1 + np.exp(-0.2 * (x_lc - 20)))
-    p8 = np.column_stack((x_lc, y_lc))
-
-    p9 = p8.copy()
-    p9[:, 1] *= -1
-    
-    anchors = random.choices([p1, p2, p3, p4, p5, p6, p7, p8, p9], k=num)
-    return torch.tensor(anchors)
 
 class DiffuseLitModel(pl.LightningModule):
     def __init__(self, model: nn.Module, scheduler: DDIMScheduler, lr: float, n_traj):
@@ -115,9 +78,13 @@ class DiffuseLitModel(pl.LightningModule):
         # self.register_buffer("future_mean", future_values['mean'])
         # self.register_buffer("future_std", future_values['std'])
 
+        self.anchors = torch.load('future_clusters_20.pt')
+        self.register_buffer("past_scale", torch.tensor([160.0, 50.0, 30.0, 12.0, 1.5, 1.5])) #tuned past and future based on min-max
+        self.register_buffer("future_scale", torch.tensor([160.0, 50.0]))
 
-        self.register_buffer("past_scale", torch.tensor([100.0, 20.0, 30.0, 5.0, 5.0, 5.0]))
-        self.register_buffer("future_scale", torch.tensor([100.0, 20.0]))
+    def generate_anchors(self, num):
+        return self.anchors[torch.randperm(len(self.anchors))[:num]]
+        
 
     def _shared_step(self, batch, stage):
         past, future, images, intent = batch['PAST'], batch['FUTURE'], batch['IMAGES'], batch['INTENT']
@@ -131,7 +98,7 @@ class DiffuseLitModel(pl.LightningModule):
 
         if stage == "train":
             noise = torch.randn(future.size(0), 2, 20, 2, device=past.device)*0.2
-            noise = noise + generate_anchors(2).to(past.device, dtype=noise.dtype)/self.future_scale
+            noise = noise + self.generate_anchors(2).to(past.device, dtype=noise.dtype)/self.future_scale
             
             bs = future_norm.shape[0]
 
@@ -152,7 +119,7 @@ class DiffuseLitModel(pl.LightningModule):
             loss = F.mse_loss(pred_x0, target)
 
         else:
-            model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent, 'FUTURE': None}
+            model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent, 'FUTURE': self.generate_anchors(self.n_traj).to(past.device, dtype=past.dtype)/self.future_scale}
             
             pred_norm = self.model(model_inputs, None, stage)
             
@@ -300,7 +267,7 @@ class DiffusionLTFMonocularModel(nn.Module):
             context = context.repeat_interleave(self.n_traj, dim=0)
 
             x_t = torch.randn(past.size(0),self.n_traj, 20, 2, device=device)*0.2
-            x_t = x_t + generate_anchors(self.n_traj).to(device, dtype=x_t.dtype)/self.future_scale
+            x_t = x_t + future.to(device, dtype=x_t.dtype) / self.future_scale
             x_t = x_t.view(context.size(0), 20, 2)
 
             save_query= None

@@ -4,6 +4,8 @@
 **/*logs/**
 **/wandb/**
 
+*.npy
+*.pt
 *.ckpt
 slurm-*
 

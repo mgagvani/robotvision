@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import IterableDataset
 from protos import e2e_pb2
 import torchvision
+from sklearn.cluster import MiniBatchKMeans
 import pickle
 import struct
 import os
@@ -105,48 +106,61 @@ if __name__ == "__main__":
     from tqdm import tqdm
     # NOTE: Replace with your path
     DATA_DIR = '/scratch/gilbreth/bnamikas/data/waymo_open_dataset_end_to_end_camera_v_1_0_0/'
-    BATCH_SIZE = 32
-    dataset = WaymoE2E(indexFile="index_train.pkl", data_dir = DATA_DIR, images=True)
+    BATCH_SIZE = 64
+    dataset = WaymoE2E(indexFile="index_train.pkl", data_dir = DATA_DIR, images=False)
     loader = DataLoader(
         dataset, 
         batch_size=BATCH_SIZE,
-        num_workers=3,
+        num_workers=4,
     )
 
-    
     def main():
-        n_samples = 0
-        sum_p = None
-        sq_sum_p = None
-        sum_f = None
-        sq_sum_f = None
-        # start = time.time()
+        all_pasts = []
+        all_futures = []
+        
+        min_p, max_p = None, None
+        min_f, max_f = None, None
+
+        print(f"Processing {len(loader.dataset)} samples...")
+
         for batch in tqdm(loader):
-            past, future = batch["PAST"], batch["FUTURE"] # Shape: [B, T, D]
+            past = batch["PAST"]    # [B, 10, 6] or similar
+            future = batch["FUTURE"] # [B, 20, 2]
 
-            if sum_p is None:
-                device = past.device
-                sum_p = torch.zeros(past.shape[1], past.shape[2]).to(device)
-                sq_sum_p = torch.zeros(past.shape[1], past.shape[2]).to(device)
-                sum_f = torch.zeros(future.shape[1], future.shape[2]).to(device)
-                sq_sum_f = torch.zeros(future.shape[1], future.shape[2]).to(device)
+            b_min_p, b_max_p = torch.amin(past, dim=0), torch.amax(past, dim=0)
+            b_min_f, b_max_f = torch.amin(future, dim=0), torch.amax(future, dim=0)
 
-            n_samples += past.shape[0]
+            if min_p is None:
+                min_p, max_p = b_min_p, b_max_p
+                min_f, max_f = b_min_f, b_max_f
+            else:
+                min_p, max_p = torch.min(min_p, b_min_p), torch.max(max_p, b_max_p)
+                min_f, max_f = torch.min(min_f, b_min_f), torch.max(max_f, b_max_f)
 
-            sum_p += torch.sum(past, dim=0)
-            sq_sum_p += torch.sum(past ** 2, dim=0)
+            all_pasts.append(past.cpu().numpy().astype(np.float32))
+            all_futures.append(future.cpu().numpy().astype(np.float32))
 
-            sum_f += torch.sum(future, dim=0)
-            sq_sum_f += torch.sum(future ** 2, dim=0)
+        print("Concatenating and saving full datasets...")
+        full_pasts = np.concatenate(all_pasts, axis=0)
+        full_futures = np.concatenate(all_futures, axis=0)
 
-        mean_p = sum_p / n_samples # Shape: [T, D]
-        std_p = torch.sqrt((sq_sum_p / n_samples) - (mean_p ** 2))
-        torch.save({'mean': mean_p, 'std': std_p}, 'past_normal_values.pt')
+        np.save('all_past_states.npy', full_pasts)
+        np.save('all_future_states.npy', full_futures)
+        
+        torch.save({'min': min_p, 'max': max_p}, 'past_min_max.pt')
+        torch.save({'min': min_f, 'max': max_f}, 'future_min_max.pt')
 
-        mean_f = sum_f / n_samples # Shape: [T, D]
-        std_f = torch.sqrt((sq_sum_f / n_samples) - (mean_f ** 2))
-        torch.save({'mean': mean_f, 'std': std_f}, 'future_normal_values.pt')
+        print("Starting MiniBatchKMeans...")
+        n_samples = full_futures.shape[0]
+        flattened_futures = full_futures.reshape(n_samples, -1)
 
+        n_clusters = 20
+        kmeans = MiniBatchKMeans(n_clusters=n_clusters, batch_size=1024, n_init='auto', random_state=42)
+        kmeans.fit(flattened_futures)
 
+        centroids = kmeans.cluster_centers_.reshape(n_clusters, 20, 2)
+        torch.save(torch.from_numpy(centroids).float(), 'future_clusters.pt')
+        
+        print("Done! Files saved: all_past_states.npy, all_future_states.npy, past_min_max.pt, future_clusters.pt")
     import cProfile
     main()

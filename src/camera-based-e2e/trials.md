@@ -50,6 +50,11 @@ slurm-10256101 - Removed better normalization
 
 slurm-10256101 - Longer run w/ more val
 
-slurm-10263254 - Multi-Trajectories
+slurm-10263348 - Multi-Trajectories
 
-- Discrete Gaussian noise anchor
+slurm-10271602 - Discrete Gaussian noise anchor
+
+slurm-10271664 - k-means clusters, min max scaling for datapoints
+
+Use scorer to predict ADE
+Choose best instead of weight the scores
