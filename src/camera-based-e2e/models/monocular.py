@@ -78,10 +78,25 @@ class MonocularModel(nn.Module):
         return self.decoder(attention.squeeze(1))  # (B, 40)
 
 class DeepMonocularModel(nn.Module):
-    def __init__(self, feature_extractor, out_dim, n_blocks=1):
+    def __init__(
+        self,
+        feature_extractor,
+        out_dim,
+        n_blocks=1,
+        n_proposals=50,
+        dt: float = 0.25,
+        max_accel: float = 8.0,
+        max_omega: float = 1.0,
+    ):
         super().__init__()
         self.features = feature_extractor
         self.feature_dim = sum(self.features.dims)
+        if out_dim % 2 != 0:
+            raise ValueError(f"out_dim must be even for (x,y) rollout, got {out_dim}")
+        self.horizon = out_dim // 2
+        self.dt = dt
+        self.max_accel = max_accel
+        self.max_omega = max_omega
         
         # Initial Query Projection (Intent + Past -> C)
         query_input_dim = 3 + 16 * 6
@@ -115,11 +130,27 @@ class DeepMonocularModel(nn.Module):
             nn.Conv2d(32, 1, 1)
         )
         
-        self.decoder = nn.Sequential(
+        self.n_proposals = n_proposals
+        self.traj_decoder = nn.Sequential(
             nn.Linear(self.feature_dim, self.feature_dim),
             nn.GELU(),
-            nn.Linear(self.feature_dim, out_dim),
+            nn.Linear(self.feature_dim, self.feature_dim),
+            nn.GELU(),
+            nn.Linear(self.feature_dim, out_dim * self.n_proposals),
         )
+        self.traj_features = nn.Sequential(
+            nn.Linear(out_dim, self.feature_dim),
+            nn.GELU(),
+            nn.Linear(self.feature_dim, self.feature_dim),
+            nn.GELU(),
+        )
+        self.score_decoder = nn.Sequential(
+            nn.Linear(self.feature_dim * 2, self.feature_dim),
+            nn.GELU(),
+            nn.Linear(self.feature_dim, self.feature_dim),
+            nn.GELU(),
+            nn.Linear(self.feature_dim, 1),
+        ) # predict score for each trajectory proposal
 
     def forward(self, x):
         # Copied from MonocularModel
@@ -151,12 +182,47 @@ class DeepMonocularModel(nn.Module):
         # copy procedure to build query_0 from MonocularModel
         intent_onehot = F.one_hot((intent - 1).long(), num_classes=3).float()
         past_flat = past.view(past.size(0), -1)
-        query = self.query_init(torch.cat([intent_onehot, past_flat], dim=1)).unsqueeze(1)
+        query: torch.Tensor = self.query_init(torch.cat([intent_onehot, past_flat], dim=1)).unsqueeze(1)
 
         for block in self.blocks:
             query = block(query, tokens)
 
+        # predict (acceleration, angular velocity) for each timestep
+        # and roll it out using the kinematic bicycle model
+        control_pred = self.traj_decoder(query.squeeze(1)).view(
+            query.size(0), self.n_proposals, self.horizon, 2
+        )  # (B, K, T, 2)
+        accel = torch.tanh(control_pred[..., 0]) * self.max_accel  # (B, K, T)
+        omega = torch.tanh(control_pred[..., 1]) * self.max_omega  # (B, K, T)
+
+        x_state = past[:, -1, 0].unsqueeze(1).expand(-1, self.n_proposals).clone()
+        y_state = past[:, -1, 1].unsqueeze(1).expand(-1, self.n_proposals).clone()
+        vx0 = past[:, -1, 2]
+        vy0 = past[:, -1, 3]
+        speed_state = torch.sqrt(vx0 * vx0 + vy0 * vy0 + 1e-6).unsqueeze(1).expand(-1, self.n_proposals).clone()
+        heading_state = torch.atan2(vy0, vx0).unsqueeze(1).expand(-1, self.n_proposals).clone()
+
+        xy_steps = []
+        for t in range(self.horizon):
+            x_state = x_state + speed_state * torch.cos(heading_state) * self.dt
+            y_state = y_state + speed_state * torch.sin(heading_state) * self.dt
+            xy_steps.append(torch.stack([x_state, y_state], dim=-1))
+
+            heading_state = heading_state + omega[:, :, t] * self.dt
+            speed_state = torch.clamp_min(speed_state + accel[:, :, t] * self.dt, 0.0)
+
+        traj_xy = torch.stack(xy_steps, dim=2)  # (B, K, T, 2)
+        traj_pred = traj_xy.reshape(traj_xy.size(0), -1)  # (B, K*T*2)
+
+        traj_pred_flat = traj_xy.reshape(traj_xy.size(0), self.n_proposals, -1)  # (B, K, T*2)
+        traj_feat: torch.Tensor = self.traj_features(traj_pred_flat.detach())  # (B, K, C)
+        query_for_score = query.squeeze(1).detach()[:, torch.newaxis, :].expand(-1, self.n_proposals, -1)  # (B, K, C)
+        score_in = torch.cat([query_for_score, traj_feat], dim=-1)  # (B, K, 2C)
+        score_pred = self.score_decoder(score_in).squeeze(-1)  # (B, K)
+
         return {
-            "trajectory": self.decoder(query.squeeze(1)),
-            "depth": output_depth
+            "trajectory": traj_pred,
+            "scores": score_pred,
+            "depth": output_depth,
+            "controls": torch.stack([accel, omega], dim=-1).reshape(query.size(0), -1),
         }

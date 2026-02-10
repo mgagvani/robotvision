@@ -1,17 +1,19 @@
-from waymo_open_dataset.protos import end_to_end_driving_submission_pb2 as wod_e2ed_submission_pb2
+from protos import end_to_end_driving_submission_pb2 as wod_e2ed_submission_pb2
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from loader import WaymoE2E
-from models.monocular import MonocularModel, SAMFeatures
-from models.base_model import collate_with_images
+from models.monocular import DeepMonocularModel
+from models.feature_extractors import SAMFeatures
+from models.base_model import LitModel, collate_with_images
 import os
 import argparse
 from typing import List
 import math
 from tqdm import tqdm
 
-def load_model(checkpoint_path: str, device: torch.device = None) -> MonocularModel:
+def load_model(checkpoint_path: str, device: torch.device = None) -> DeepMonocularModel:
     """Load a trained MonocularModel from a checkpoint.
     
     Args:
@@ -21,37 +23,34 @@ def load_model(checkpoint_path: str, device: torch.device = None) -> MonocularMo
     Returns:
         The loaded MonocularModel in eval mode.
     """
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if not torch.cuda.is_available():
+        raise RuntimeError("Not running on CUDA")
+    else:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        device = torch.device("cuda" if device is None else device)
     
-    in_dim = 16 * 6  # Past: (B, 16, 6)
     out_dim = 20 * 2  # Future: (B, 20, 2)
-    model = MonocularModel(in_dim=in_dim, out_dim=out_dim, feature_extractor=SAMFeatures())
-
-    # Handle torch.compile'd model checkpoints (same fix as viz.py)
-    ckpt = torch.load(checkpoint_path, map_location="cpu")
-    state = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
-    mapped = {}
-    for k, v in state.items():
-        k = k.replace("model._orig_mod.", "").replace("model.", "")
-        if k.startswith("features.sam_pos_embed"):
-            k = k.replace("features.sam_pos_embed", "features.sam_model.model.pos_embed")
-        elif k.startswith("features.sam_pos_embed_window"):
-            k = k.replace("features.sam_pos_embed_window", "features.sam_model.model.pos_embed_window")
-        elif k.startswith("features.sam_patch_embed"):
-            k = k.replace("features.sam_patch_embed", "features.sam_model.model.patch_embed")
-        elif k.startswith("features.sam_blocks"):
-            k = k.replace("features.sam_blocks", "features.sam_model.model.blocks")
-        mapped[k] = v
-
-    model.load_state_dict(mapped, strict=True)
+    model = DeepMonocularModel(out_dim=out_dim, 
+                               feature_extractor=SAMFeatures(model_name="timm/vit_pe_spatial_small_patch16_512.fb"),
+                               n_blocks=4,
+                               n_proposals=50)
+    lit_model = LitModel.load_from_checkpoint(
+        checkpoint_path,
+        model=model,
+        lr=1e-4,
+        map_location="cpu",
+        weights_only=False,
+    )
+    model = lit_model.model
     model.to(device)
     model.eval()
+    for param in model.parameters():
+        param.requires_grad = False
     
     return model
 
 def generate_submission_data(
-    model: MonocularModel, 
+    model: DeepMonocularModel, 
     data_loader: DataLoader,
     device: torch.device = None
 ) -> List[wod_e2ed_submission_pb2.FrameTrajectoryPredictions]:
@@ -70,7 +69,7 @@ def generate_submission_data(
     
     predictions = []
 
-    model.compile(mode="reduce-overhead")
+    model = torch.compile(model, mode="default")
     
     with torch.inference_mode():
         for batch in tqdm(data_loader, desc="Generating submission predictions"):
@@ -82,6 +81,21 @@ def generate_submission_data(
             # Model forward pass
             model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent}
             pred_future = model(model_inputs)  # (B, 40)
+
+            pred_futures, pred_depth, pred_scores = pred_future["trajectory"], pred_future.get("depth", None), pred_future.get("scores", None)
+
+            t2 = 20 * 2
+            k_modes = getattr(model, "n_proposals", 1)
+            if pred_futures.ndim == 2 and pred_futures.shape[1] == k_modes * t2:
+                pred_futures = pred_futures.view(pred_futures.size(0), k_modes, t2)
+
+            if pred_scores is None:
+                raise ValueError("DeepMonocularModel must output scores")
+            else:
+                best_idx = pred_scores.argmin(dim=1)  # (B,)
+
+            pred_future = pred_futures[torch.arange(pred_futures.size(0)), best_idx, :]  # (B, 40)
+
             pred_future = pred_future.view(-1, 20, 2).cpu().numpy()  # (B, 20, 2)
             
             # Create submission entries for each sample in the batch
@@ -127,12 +141,12 @@ def serialize_and_save_submission(predictions: List[wod_e2ed_submission_pb2.Fram
         shard.authors[:] = ['Manav Gagvani']  
         shard.affiliation = 'Purdue University'
         shard.account_name = 'manavgagvani@gmail.com' 
-        shard.unique_method_name = 'TrajSAM' 
+        shard.unique_method_name = 'TrajScorer' 
         shard.method_link = ''  # TODO: make project page + add link
-        shard.description = 'SAM features -> cross-attention -> regress points'
+        shard.description = 'ViT features -> cross-attention -> scorer + multiple trajectory heads'
         shard.uses_public_model_pretraining = True
-        shard.public_model_names.extend(['SAM 2.1'])
-        shard.num_model_parameters = "30m" # TODO: don't hardcode, can be found with parameters()
+        shard.public_model_names.extend(['Perception Encoder Small'])
+        shard.num_model_parameters = "36m" # TODO: don't hardcode, can be found with parameters()
         with open(sub_file_names[i], 'wb') as fp:
             fp.write(shard.SerializeToString())
 
@@ -144,8 +158,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Data 
-    test_dataset = WaymoE2E(batch_size=16, indexFile='index_test.pkl', data_dir=args.data_dir, images=True, n_items=None)
-    test_loader = DataLoader(test_dataset, batch_size=16, num_workers=32, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
+    test_dataset = WaymoE2E(indexFile='index_test.pkl', data_dir=args.data_dir, images=True, n_items=None)
+    test_loader = DataLoader(test_dataset, batch_size=128, num_workers=16, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
 
     # Load model
     model = load_model(args.checkpoint)
