@@ -97,7 +97,7 @@ class DiffuseLitModel(pl.LightningModule):
         future_norm = future / self.future_scale
 
         if stage == "train":
-            noise = torch.randn(future.size(0), 20, 2, device=past.device)*0.2
+            noise = torch.randn(future.size(0), 20, 2, device=past.device)
             noise = noise + self.generate_anchors(1).to(past.device, dtype=noise.dtype)/self.future_scale
             
             bs = future_norm.shape[0]
@@ -119,12 +119,12 @@ class DiffuseLitModel(pl.LightningModule):
             # target = noise
 
             pred_reconstruct = pred_x0*self.future_scale
-
-            score_loss= torch.abs(torch.mean(torch.mean(torch.norm(pred_reconstruct- future, dim=-1), dim=1) - score.view(-1)))
+            mask = timesteps > 900
+            score_loss= F.mse_loss(torch.mean(torch.norm(pred_reconstruct- future, dim=-1), dim=1)*mask, score.view(-1)*mask)
             # print(torch.norm(pred_reconstruct- future, dim=-1))
             # print(torch.mean(torch.norm(pred_reconstruct- future, dim=-1), dim=1).shape, score.view(-1))
             # print(score_loss)
-            loss = F.mse_loss(pred_x0, target) * score_loss * 10
+            loss = F.mse_loss(pred_x0, target) + score_loss / 5000 
 
         else:
             model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent, 'FUTURE': self.generate_anchors(self.n_traj).to(past.device, dtype=past.dtype)/self.future_scale}
@@ -155,7 +155,7 @@ class DiffuseLitModel(pl.LightningModule):
         return self._shared_step(batch, "val")
 
 class DiffusionLTFMonocularModel(nn.Module):
-    def __init__(self, feature_extractor, scheduler: DDIMScheduler, n_dims=256, n_traj=5, n_layers=6):
+    def __init__(self, feature_extractor, scheduler: DDIMScheduler, n_dims=256, n_traj=20, n_layers=6):
         super().__init__()
         self.n_dims = n_dims
         self.scheduler = scheduler 
@@ -226,6 +226,7 @@ class DiffusionLTFMonocularModel(nn.Module):
     def forward(self, x, t, stage):
         past, images, intent, future = x['PAST'], x['IMAGES'], x['INTENT'], x['FUTURE']
         
+        ### Get the visual tokens
         front_cam = images[1]
         with torch.no_grad():
             feats = self.features(front_cam)
@@ -236,29 +237,22 @@ class DiffusionLTFMonocularModel(nn.Module):
             tokens = feats.flatten(2)
         tokens = self.scale_features(torch.permute(tokens, (0, 2, 1)))
         
-
+        ## Get intent embedding and past projection
         intent_token = self.intent_embed(intent - 1).unsqueeze(1)
         past_tokens = self.past_projection(past)
-        # print(past_tokens.shape)
-        # print(intent_token.shape)
-        # print(tokens.shape)
+
 
         context = torch.cat([tokens, past_tokens, intent_token], dim=1) + self.positional_encoding
 
         if stage == "train":
-            future = self.future_project(future) + self.future_embeddings.to(past.device) + self.time_embed(t).unsqueeze(1)
-            future = self.encoder_mlp_1(future)
-            future_atten = future
-            for block in self.encoder_selfattention:
-                future_atten = block(future_atten, future_atten)
-            query = self.encoder_mlp_2(future + future_atten)
+            queries = self.encode_future(future, t)
             
             for block in self.decoder_blocks:
-                query = block(query, context)
+                queries = block(queries, context)
 
 
-            waypoints = self.predict_waypoints(query.squeeze(1))
-            score = self.scorer(query.view(past.size(0), -1))
+            waypoints = self.predict_waypoints(queries.squeeze(1))
+            score = self.scorer(queries.view(past.size(0), -1))
             
             return waypoints, score
         else:
@@ -266,7 +260,7 @@ class DiffusionLTFMonocularModel(nn.Module):
             
             context = context.repeat_interleave(self.n_traj, dim=0)
 
-            x_t = torch.randn(past.size(0),self.n_traj, 20, 2, device=device)*0.2
+            x_t = torch.randn(past.size(0),self.n_traj, 20, 2, device=device)
             x_t = x_t + future.to(device, dtype=x_t.dtype) / self.future_scale
             x_t = x_t.view(context.size(0), 20, 2)
 
@@ -275,21 +269,15 @@ class DiffusionLTFMonocularModel(nn.Module):
             self.scheduler.set_timesteps(50, device=device)
             for t_step in self.scheduler.timesteps:
                 # Predict noise or x0 (depending on sampling strategy)
-                future = self.future_project(x_t) + self.future_embeddings.to(past.device) + self.time_embed(t_step).unsqueeze(1)
-                future = self.encoder_mlp_1(future)
-                
-                future_atten = future
-                for block in self.encoder_selfattention:
-                    future_atten = block(future_atten, future_atten)
-                query = self.encoder_mlp_2(future + future_atten)
+                queries = self.encode_future(x_t, t_step)
                 
 
                 for block in self.decoder_blocks:
-                    query = block(query, context)
+                    queries = block(queries, context)
 
                 
-                pred_original_sample = self.predict_waypoints(query)
-                save_query = query
+                pred_original_sample = self.predict_waypoints(queries)
+                save_query = queries
                 step_output = self.scheduler.step(model_output=pred_original_sample, timestep=t_step, sample=x_t)
                 x_t = step_output.prev_sample
             
@@ -303,6 +291,15 @@ class DiffusionLTFMonocularModel(nn.Module):
             predicted_x_t = torch.gather(x_t, 1, index_reshaped)
 
             return predicted_x_t 
+    
+    def encode_future(self, future, t):
+        future = self.future_project(future) + self.future_embeddings.to(future.device) + self.time_embed(t).unsqueeze(1)
+        future = self.encoder_mlp_1(future)
+        
+        future_atten = future
+        for block in self.encoder_selfattention:
+            future_atten = block(future_atten, future_atten)
+        return self.encoder_mlp_2(future + future_atten)
 
 
 class DiffusionMonocularModel(nn.Module):
@@ -416,7 +413,7 @@ if __name__ == "__main__":
         scheduler=scheduler,
     )
     
-    lit_model = DiffuseLitModel(model=model, scheduler=scheduler, lr=args.lr, n_traj=5)
+    lit_model = DiffuseLitModel(model=model, scheduler=scheduler, lr=args.lr, n_traj=20)
 
     base_path = Path(args.data_dir).parent.as_posix()
     trainer = pl.Trainer(

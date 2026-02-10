@@ -57,8 +57,13 @@ slurm-10271602 - Discrete Gaussian noise anchor
 slurm-10272278 - k-means clusters, min max scaling for datapoints
 
 slurm-10272409 - ADE loss
+slurm-10272419 - larger scorer (failed, removed)
 
-slurm-10272419 - larger scorer
+slurm-10273343 - try to add score loss (w/o increased noise)
+slurm-10273205 - increase noise for ade loss
+slurm-10273351 - add ade loss w/ increased noise
+
+
 
 Use scorer to predict ADE
 Choose best instead of weight the scores
