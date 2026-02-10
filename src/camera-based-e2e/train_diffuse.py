@@ -157,7 +157,7 @@ class DiffusionLTFMonocularModel(nn.Module):
         self.features.eval()
         self.feature_dim = sum(self.features.dims)
         self.scale_features = nn.Linear(self.feature_dim, self.n_dims)
-        self.register_buffer("future_scale", torch.tensor([100.0, 20.0]))
+        self.register_buffer("future_scale", torch.tensor([160.0, 50.0]))
 
 
         self.intent_embed = nn.Embedding(3, self.n_dims) # embed the different intents
