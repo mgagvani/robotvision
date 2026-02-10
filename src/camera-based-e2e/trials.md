@@ -54,7 +54,11 @@ slurm-10263348 - Multi-Trajectories
 
 slurm-10271602 - Discrete Gaussian noise anchor
 
-slurm-10271664 - k-means clusters, min max scaling for datapoints
+slurm-10272278 - k-means clusters, min max scaling for datapoints
+
+slurm-10272409 - ADE loss
+
+slurm-10272419 - larger scorer
 
 Use scorer to predict ADE
 Choose best instead of weight the scores

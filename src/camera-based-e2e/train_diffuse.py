@@ -97,8 +97,8 @@ class DiffuseLitModel(pl.LightningModule):
         future_norm = future / self.future_scale
 
         if stage == "train":
-            noise = torch.randn(future.size(0), 2, 20, 2, device=past.device)*0.2
-            noise = noise + self.generate_anchors(2).to(past.device, dtype=noise.dtype)/self.future_scale
+            noise = torch.randn(future.size(0), 20, 2, device=past.device)*0.2
+            noise = noise + self.generate_anchors(1).to(past.device, dtype=noise.dtype)/self.future_scale
             
             bs = future_norm.shape[0]
 
@@ -107,16 +107,24 @@ class DiffuseLitModel(pl.LightningModule):
             ).long()
             
 
-            future_noisy = self.scheduler.add_noise(future_norm.unsqueeze(1).expand(-1, 2, -1, -1), noise, timesteps)
+            future_noisy = self.scheduler.add_noise(future_norm, noise, timesteps)
             
             model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent, 'FUTURE': future_noisy}
             
-            pred_x0 = self.model(model_inputs, timesteps, stage)
+            pred_x0, score = self.model(model_inputs, timesteps, stage)
+
             
             target = future_norm#.view(future_norm.size(0), -1) # for x0
             # target = noise.view(noise.size(0), -1) # for noise
             # target = noise
-            loss = F.mse_loss(pred_x0, target)
+
+            pred_reconstruct = pred_x0*self.future_scale
+
+            score_loss= torch.abs(torch.mean(torch.mean(torch.norm(pred_reconstruct- future, dim=-1), dim=1) - score.view(-1)))
+            # print(torch.norm(pred_reconstruct- future, dim=-1))
+            # print(torch.mean(torch.norm(pred_reconstruct- future, dim=-1), dim=1).shape, score.view(-1))
+            # print(score_loss)
+            loss = F.mse_loss(pred_x0, target) * score_loss * 10
 
         else:
             model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent, 'FUTURE': self.generate_anchors(self.n_traj).to(past.device, dtype=past.dtype)/self.future_scale}
@@ -185,6 +193,8 @@ class DiffusionLTFMonocularModel(nn.Module):
         self.scorer = nn.Sequential(
             nn.Linear(self.n_dims*20, self.n_dims),
             nn.ReLU(),
+            nn.Linear(self.n_dims, self.n_dims),
+            nn.ReLU(),
             nn.Linear(self.n_dims, 1)
         )
 
@@ -236,31 +246,21 @@ class DiffusionLTFMonocularModel(nn.Module):
         context = torch.cat([tokens, past_tokens, intent_token], dim=1) + self.positional_encoding
 
         if stage == "train":
-            future_l, future_r = torch.unbind(future, dim=1)
-            waypoints = []
-            scores = []
-            for future in [future_l, future_r]:
-                future = self.future_project(future) + self.future_embeddings.to(past.device) + self.time_embed(t).unsqueeze(1)
-                future = self.encoder_mlp_1(future)
-                future_atten = future
-                for block in self.encoder_selfattention:
-                    future_atten = block(future_atten, future_atten)
-                query = self.encoder_mlp_2(future + future_atten)
-                
-                for block in self.decoder_blocks:
-                    query = block(query, context)
-
-
-                waypoints.append(self.predict_waypoints(query.squeeze(1)))
-                scores.append(self.scorer(query.view(past.size(0), -1)))
-
-            scores = torch.stack(scores)
-            waypoints = torch.stack(waypoints)
-
-            scores = torch.softmax(scores, dim=0)
-            waypoints = (waypoints * scores.unsqueeze(-1)).sum(dim=0)
+            future = self.future_project(future) + self.future_embeddings.to(past.device) + self.time_embed(t).unsqueeze(1)
+            future = self.encoder_mlp_1(future)
+            future_atten = future
+            for block in self.encoder_selfattention:
+                future_atten = block(future_atten, future_atten)
+            query = self.encoder_mlp_2(future + future_atten)
             
-            return waypoints
+            for block in self.decoder_blocks:
+                query = block(query, context)
+
+
+            waypoints = self.predict_waypoints(query.squeeze(1))
+            score = self.scorer(query.view(past.size(0), -1))
+            
+            return waypoints, score
         else:
             device = past.device
             
