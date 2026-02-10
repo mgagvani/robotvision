@@ -96,8 +96,8 @@ class DiffuseLitModel(pl.LightningModule):
         past = past / self.past_scale
         future_norm = future / self.future_scale
 
+        noise = torch.randn(future.size(0), 20, 2, device=past.device)
         if stage == "train":
-            noise = torch.randn(future.size(0), 20, 2, device=past.device)
             noise = noise + self.generate_anchors(1).to(past.device, dtype=noise.dtype)/self.future_scale
             
             bs = future_norm.shape[0]
@@ -127,7 +127,8 @@ class DiffuseLitModel(pl.LightningModule):
             loss = F.mse_loss(pred_x0, target) + score_loss / 5000 
 
         else:
-            model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent, 'FUTURE': self.generate_anchors(self.n_traj).to(past.device, dtype=past.dtype)/self.future_scale}
+            anchors = self.generate_anchors(self.n_traj).to(past.device, dtype=past.dtype)/self.future_scale
+            model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent, 'FUTURE': anchors}
             
             pred_norm = self.model(model_inputs, None, stage)
             

@@ -48,22 +48,22 @@ slurm-10255654 - added gradient clipping to try and cure unstable training
 
 slurm-10256101 - Removed better normalization
 
-slurm-10256101 - Longer run w/ more val
+slurm-10256101 - Longer run w/ more val -> 1.54
 
-slurm-10263348 - Multi-Trajectories
+slurm-10263348 - Multi-Trajectories -> 1.860
 
 slurm-10271602 - Discrete Gaussian noise anchor
 
-slurm-10272278 - k-means clusters, min max scaling for datapoints
+slurm-10272278 - k-means clusters, min max scaling for datapoints -> 2.840
 
-slurm-10272409 - ADE loss
-slurm-10272419 - larger scorer (failed, removed)
+slurm-10272409 - ADE loss -> 4.180
+slurm-10272419 - larger scorer (failed, removed) -> 4.810
 
-slurm-10273343 - try to add score loss (w/o increased noise)
-slurm-10273205 - increase noise for ade loss
-slurm-10273351 - add ade loss w/ increased noise
+slurm-10273343 - try to add score loss (w/o increased noise) -> 1.950
+slurm-10273514 - reduced scaling factor (w/o increased noise) -> 
+slurm-10273205 - increase noise for ade loss -> 5.380
+slurm-10273351 - add ade loss w/ increased noise ->
 
+slurm-10273578 - add ade loss w/ increased noise (all correct)
 
-
-Use scorer to predict ADE
-Choose best instead of weight the scores
+slurm- - Decoder now outputs a score as well.
