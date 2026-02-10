@@ -20,11 +20,12 @@ class BaseModel(nn.Module):
         return self.nn(x)
     
 class LitModel(pl.LightningModule):
-    def __init__(self, model: nn.Module, lr: float, lr_vision: float | None = None):
+    def __init__(self, model: nn.Module, lr: float, lr_vision: float | None = None, rfs_weight: float = 0.0):
         super(LitModel, self).__init__()
         self.model = model
         self.hparams.lr = lr
         self.hparams.lr_vision = lr_vision
+        self.hparams.rfs_weight = rfs_weight
 
         self.example_input_array = ({
             'PAST': torch.zeros((1, 16, 6)),  # PAST
@@ -44,6 +45,73 @@ class LitModel(pl.LightningModule):
         Average Displacement Error -> L2 Norm -> Average Euclidean Distance between predicted and ground truth future trajectory
         """
         return torch.mean(torch.norm(pred - gt, dim=-1))
+
+    def time_thresholds(self, t_idx):
+        # Time-based thresholds at 3s and 5s.
+        lat = torch.where(t_idx <= 3, 1.0, 1.8)
+        lng = torch.where(t_idx <= 3, 4.0, 7.2)
+        return lat, lng
+
+    def speed_scale(self, v):
+        # Speed-based scaling copied from RFS paper.
+        return torch.where(
+            v < 1.4,
+            0.5,
+            torch.where(
+                v < 11.0,
+                0.5 + 0.5 * (v - 1.4) / (11.0 - 1.4),
+                1.0
+            )
+        )
+
+    def compute_direction(self, trajectory):
+        # Pad with first point so displacement stays (B, T, 2).
+        padded = torch.cat([trajectory[:, :1], trajectory], dim=1)
+        displacement = padded[:, 1:] - padded[:, :-1]
+        lng_dir = F.normalize(displacement, p=2, dim=-1, eps=1e-6)
+        lat_dir = torch.stack([-lng_dir[..., 1], lng_dir[..., 0]], dim=-1)
+        return lng_dir, lat_dir
+
+    def rfs_loss(self, pred, gt, lng_dir, lat_dir, speed, t_idx):
+        """
+        pred, gt: (B, T, 2)
+        speed: (B,) or (B, T)
+        t_idx: (T,) or (B, T)
+        """
+        delta = pred - gt
+        delta_lng = (delta * lng_dir).sum(dim=-1).abs()
+        delta_lat = (delta * lat_dir).sum(dim=-1).abs()
+
+        tau_lat_raw, tau_lng_raw = self.time_thresholds(t_idx)
+        scale = self.speed_scale(speed)
+        if scale.dim() == 1:
+            scale = scale.unsqueeze(1)
+
+        tau_lat = tau_lat_raw * scale
+        tau_lng = tau_lng_raw * scale
+
+        deviation = torch.max(
+            delta_lat / tau_lat,
+            delta_lng / tau_lng,
+        )
+        score = torch.where(
+            deviation <= 1,
+            torch.ones_like(deviation),
+            torch.pow(0.1, deviation - 1)
+        )
+        return (1.0 - score).mean()
+
+    def _prepare_rfs_inputs(self, past, future, pred_future):
+        speed = torch.norm(past[..., 2:4], dim=-1)[:, -1]  # (B,), speed at last observed time step
+        full_lng_dir, full_lat_dir = self.compute_direction(future)
+        indices = [11, 19]  # 3s and 5s into the future
+
+        pred_slice = pred_future[:, indices, :]
+        gt_slice = future[:, indices, :]
+        lng_dir_slice = full_lng_dir[:, indices, :]
+        lat_dir_slice = full_lat_dir[:, indices, :]
+        t_idx = torch.tensor([3.0, 5.0], device=future.device).unsqueeze(0).expand(future.size(0), -1)
+        return pred_slice, gt_slice, lng_dir_slice, lat_dir_slice, speed, t_idx
     
     # ---- optimizers ----
     def configure_optimizers(self):
@@ -103,6 +171,21 @@ class LitModel(pl.LightningModule):
         else:
             raise ValueError(f"Unexpected pred shape {pred.shape}; expected (B, T*2) or (B, {k_modes}*T*2).")
 
+        if pred_scores is not None and pred.size(1) > 1:
+            rfs_pred_idx = pred_scores.argmin(dim=1)
+        else:
+            rfs_pred_idx = torch.zeros(pred.size(0), dtype=torch.long, device=pred.device)
+        pred_for_rfs = pred[torch.arange(pred.size(0), device=pred.device), rfs_pred_idx]
+
+        pred_slice, gt_slice, lng_dir_slice, lat_dir_slice, speed, t_idx = self._prepare_rfs_inputs(
+            past,
+            future,
+            pred_for_rfs,
+        )
+        rfs_unweighted = self.rfs_loss(pred_slice, gt_slice, lng_dir_slice, lat_dir_slice, speed, t_idx)
+        rfs_weight = getattr(self.hparams, "rfs_weight", 0.0)
+        loss_rfs = rfs_weight * rfs_unweighted
+
         # ADE per mode: (B, K)
         dist = torch.norm(pred - future[:, torch.newaxis, :, :], dim=-1)  # (B, K, T)
         ade_per_mode = dist.mean(dim=-1)
@@ -143,12 +226,14 @@ class LitModel(pl.LightningModule):
         loss_depth *= 0.1 # slightly enabled
         loss_ade *= 1.0 # TODO: tune loss terms
         loss_score *= 1.0
-        total_loss = loss_ade + loss_depth + loss_score
+        total_loss = loss_ade + loss_depth + loss_score + loss_rfs
         # TODO: improve logging both to disk and to console
         log_payload = {
             f"{stage}_loss_ade": loss_ade,
             f"{stage}_loss_score": loss_score,
             f"{stage}_loss_depth": loss_depth,
+            f"{stage}_loss_rfs": loss_rfs,
+            f"{stage}_rfs_unweighted": rfs_unweighted,
             f"{stage}_loss": total_loss,
         }
         if ade_pred is not None:
