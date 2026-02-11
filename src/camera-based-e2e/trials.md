@@ -60,10 +60,17 @@ slurm-10272409 - ADE loss -> 4.180
 slurm-10272419 - larger scorer (failed, removed) -> 4.810
 
 slurm-10273343 - try to add score loss (w/o increased noise) -> 1.950
-slurm-10273514 - reduced scaling factor (w/o increased noise) -> 
+slurm-10273514 - reduced scaling factor (w/o increased noise) -> 1.98
 slurm-10273205 - increase noise for ade loss -> 5.380
-slurm-10273351 - add ade loss w/ increased noise ->
+slurm-10273351 - add ade loss w/ increased noise -> 1.800
 
-slurm-10273578 - add ade loss w/ increased noise (all correct)
+slurm-10275302 - add ade loss w/ increased noise (all correct) - 1.97
 
-slurm- - Decoder now outputs a score as well.
+
+slurm-10275406 - Select closest anchor to cluster
+slurm-10275409 - Select closest anchor to cluster ( reduced noise)
+
+
+bycicle trajectory unwraping
+try 3 cameras
+reduce learning rate?

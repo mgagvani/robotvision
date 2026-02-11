@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from matplotlib import pyplot as plt
 import pandas as pd
 import random
+import os
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -84,7 +85,12 @@ class DiffuseLitModel(pl.LightningModule):
 
     def generate_anchors(self, num):
         return self.anchors[torch.randperm(len(self.anchors))[:num]]
-        
+    
+    def get_closest_anchor(self, future):
+
+        dist_matrix = torch.cdist(future.view(-1, 40), self.anchors.to(future.device).view(-1, 40), p=2)
+        closest_anchor_indices = torch.argmin(dist_matrix, dim=1)
+        return self.anchors.to(future.device)[closest_anchor_indices]
 
     def _shared_step(self, batch, stage):
         past, future, images, intent = batch['PAST'], batch['FUTURE'], batch['IMAGES'], batch['INTENT']
@@ -97,8 +103,8 @@ class DiffuseLitModel(pl.LightningModule):
         future_norm = future / self.future_scale
 
         if stage == "train":
-            noise = torch.randn(future.size(0), 20, 2, device=past.device)
-            noise = noise + self.generate_anchors(1).to(past.device, dtype=noise.dtype)/self.future_scale
+            noise = torch.randn(future.size(0), 20, 2, device=past.device) * 0.2
+            noise = noise + self.get_closest_anchor(future).to(past.device, dtype=noise.dtype)/self.future_scale
             
             bs = future_norm.shape[0]
 
@@ -128,7 +134,7 @@ class DiffuseLitModel(pl.LightningModule):
 
         else:
             anchors = self.generate_anchors(self.n_traj).to(past.device, dtype=past.dtype)/self.future_scale
-            noise = torch.randn(past.size(0),self.n_traj, 20, 2, device=past.device)
+            noise = torch.randn(past.size(0),self.n_traj, 20, 2, device=past.device) * 0.2
             noisy_anchors = noise + anchors.to(past.device, dtype=noise.dtype) / self.future_scale
             
             model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent, 'FUTURE': noisy_anchors}
@@ -166,10 +172,10 @@ class DiffusionLTFMonocularModel(nn.Module):
         self.n_traj = n_traj
 
         # Feature extractor
-        self.n_tokens = self.features.data_config["input_size"][1] // self.features.patch_size * (self.features.data_config["input_size"][2] // self.features.patch_size)
         self.features = feature_extractor
         self.features.eval()
         self.feature_dim = sum(self.features.dims)
+        self.n_tokens = self.features.data_config["input_size"][1] // self.features.patch_size * (self.features.data_config["input_size"][2] // self.features.patch_size)
 
         # Context projecting/embeddings
         self.scale_features = nn.Linear(self.feature_dim, self.n_dims)
@@ -388,15 +394,17 @@ if __name__ == "__main__":
     parser.add_argument('--data_dir', type=str, required=True, help='Path to Waymo E2E data directory')
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--max_epochs', type=int, default=2, help='Number of epochs to train')
+    parser.add_argument('--max_epochs', type=int, default=4, help='Number of epochs to train')
     args = parser.parse_args()
+
+    torch.set_float32_matmul_precision('high')
 
     # Data 
     train_dataset = WaymoE2E(indexFile='index_train.pkl', data_dir=args.data_dir, images=True, n_items=250000)
     test_dataset = WaymoE2E(indexFile='index_val.pkl', data_dir=args.data_dir, images=True, n_items=500)
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=1, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
-    val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=1, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=8, collate_fn=collate_with_images, persistent_workers=True, pin_memory=True)
+    val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=8, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
 
     scheduler = DDIMScheduler(
         num_train_timesteps=1000,
