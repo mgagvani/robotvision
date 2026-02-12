@@ -150,7 +150,7 @@ class DeepMonocularModel(nn.Module):
             nn.Linear(self.feature_dim, self.feature_dim),
             nn.GELU(),
             nn.Linear(self.feature_dim, 1),
-        ) # predict score for each trajectory proposal
+        ) # no softmax, since we use cross entropy later
 
     def forward(self, x):
         # Copied from MonocularModel
