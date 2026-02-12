@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
+import torchvision
 
 from .losses.depth_loss import DepthLoss
 
@@ -34,6 +35,40 @@ class LitModel(pl.LightningModule):
         },)
 
         self.save_hyperparameters()
+
+    # --- Data Loading ---- 
+    def transfer_batch_to_device(self, batch, device, dataloader_idx):
+        # move actual tensors
+        out = super().transfer_batch_to_device(batch, device, dataloader_idx)
+        # keep encoded JPEG bytes on cpu to decode later
+        if "IMAGES_JPEG" in batch:
+            out["IMAGES_JPEG"] = batch["IMAGES_JPEG"]
+        return out
+
+
+    def decode_batch_nvjpeg(self, images_jpeg: list[list[torch.Tensor]]) -> list[torch.Tensor]:
+        # Flatten cameras
+        flat_encoded, cam_sizes = [], []
+        for cam in images_jpeg:
+            cam_sizes.append(len(cam))
+            flat_encoded.extend(
+                jpg if isinstance(jpg, torch.Tensor) else torch.frombuffer(memoryview(jpg), dtype=torch.uint8)
+                for jpg in cam
+            )
+        
+        flat_decoded = torchvision.io.decode_jpeg(
+            flat_encoded, 
+            mode=torchvision.io.ImageReadMode.UNCHANGED,
+            device = self.device,
+        ) # list of (C, H, W) gpu tensors
+
+        out = []
+        idx = 0
+        for n in cam_sizes:
+            cam_list = flat_decoded[idx: idx+n]
+            idx += n
+            out.append(torch.stack(cam_list, dim=0))  # (B, C, H, W)
+        return out
 
     def on_fit_start(self) -> None:
         super().on_fit_start()
@@ -142,7 +177,15 @@ class LitModel(pl.LightningModule):
         return self.model(x)
     
     def _shared_step(self, batch: torch.Tensor, stage: str) -> torch.Tensor:
-        past, future, images, intent = batch['PAST'], batch['FUTURE'], batch['IMAGES'], batch['INTENT']
+        past, future, intent = batch['PAST'], batch['FUTURE'], batch['INTENT']
+
+        if "IMAGES_JPEG" in batch:
+            images_jpeg = batch["IMAGES_JPEG"]
+            images = self.decode_batch_nvjpeg(images_jpeg)
+        elif "IMAGES" in batch:
+            images = batch["IMAGES"]
+        else:
+            raise KeyError("Batch must contain either 'IMAGES_JPEG' or 'IMAGES' key.")
         
         # `past` is our input (B, 16, 6) e.g. Batch x Time x (x, y, v_x, v_y, a_x, a_y)
         # and `future` is our output (B, 20, 2) e.g. Batch x Time x (x, y)
@@ -256,13 +299,13 @@ def collate_with_images(batch):
     intent = torch.as_tensor([b["INTENT"] for b in batch])
     names = [b["NAME"] for b in batch]
 
-    cams = list(zip(*[b["IMAGES"] for b in batch]))  # per-camera tuples
-    images = [torch.stack(cam_imgs, dim=0) for cam_imgs in cams]  # stay on CPU
+    cams = list(zip(*[b["IMAGES_JPEG"] for b in batch]))  # per-camera tuples
+    images_jpeg = [list(cam_imgs) for cam_imgs in cams]  # stay on CPU
 
     return {
         "PAST": torch.stack(past, dim=0),
         "FUTURE": torch.stack(future, dim=0),
         "INTENT": intent,
-        "IMAGES": images,
+        "IMAGES_JPEG": images_jpeg,
         "NAME": names,
     }
