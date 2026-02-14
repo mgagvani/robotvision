@@ -102,8 +102,10 @@ class DiffuseLitModel(pl.LightningModule):
         past = past / self.past_scale
         future_norm = future / self.future_scale
 
+        scaler = 1
+
         if stage == "train":
-            noise = torch.randn(future.size(0), 20, 2, device=past.device) * 0.2
+            noise = torch.randn(future.size(0), 20, 2, device=past.device) * scaler
             noise = noise + self.get_closest_anchor(future).to(past.device, dtype=noise.dtype)/self.future_scale
             
             bs = future_norm.shape[0]
@@ -134,11 +136,11 @@ class DiffuseLitModel(pl.LightningModule):
 
         else:
             anchors = self.generate_anchors(self.n_traj).to(past.device, dtype=past.dtype)/self.future_scale
-            noise = torch.randn(past.size(0),self.n_traj, 20, 2, device=past.device) * 0.2
-            noisy_anchors = noise + anchors.to(past.device, dtype=noise.dtype) / self.future_scale
-            
+            noise = torch.randn(past.size(0),self.n_traj, 20, 2, device=past.device) * scaler
+            noisy_anchors = noise + anchors.to(past.device, dtype=noise.dtype)
+
             model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent, 'FUTURE': noisy_anchors}
-            
+
             pred_norm = self.model(model_inputs, None, stage)
             
             # Denormalize
@@ -176,6 +178,11 @@ class DiffusionLTFMonocularModel(nn.Module):
         self.features.eval()
         self.feature_dim = sum(self.features.dims)
         self.n_tokens = self.features.data_config["input_size"][1] // self.features.patch_size * (self.features.data_config["input_size"][2] // self.features.patch_size)
+
+        # need now for bicycle in forward loop
+        self.register_buffer("past_scale", torch.tensor([160.0, 50.0, 30.0, 12.0, 1.5, 1.5])) #tuned past and future based on min-max
+        self.register_buffer("future_scale", torch.tensor([160.0, 50.0]))
+
 
         # Context projecting/embeddings
         self.scale_features = nn.Linear(self.feature_dim, self.n_dims)
@@ -229,6 +236,31 @@ class DiffusionLTFMonocularModel(nn.Module):
             nn.Linear(self.n_dims, 2)
         )
 
+    def unwrap_preds(self, past, control_pred, n_proposals, max_accel: float = 8.0, max_omega: float = 1.0, dt = 0.25):
+        past = past * self.past_scale
+        control_pred = control_pred * self.future_scale
+
+        accel = torch.tanh(control_pred[..., 0]) * max_accel  # (B, K, T)
+        omega = torch.tanh(control_pred[..., 1]) * max_omega  # (B, K, T)
+
+        x_state = past[:, -1, 0].unsqueeze(1).expand(-1, n_proposals).clone()
+        y_state = past[:, -1, 1].unsqueeze(1).expand(-1, n_proposals).clone()
+        vx0 = past[:, -1, 2]
+        vy0 = past[:, -1, 3]
+        speed_state = torch.sqrt(vx0 * vx0 + vy0 * vy0 + 1e-6).unsqueeze(1).expand(-1, n_proposals).clone()
+        heading_state = torch.atan2(vy0, vx0).unsqueeze(1).expand(-1, n_proposals).clone()
+
+        xy_steps = []
+        for t in range(20):
+            x_state = x_state + speed_state * torch.cos(heading_state) * dt
+            y_state = y_state + speed_state * torch.sin(heading_state) * dt
+            xy_steps.append(torch.stack([x_state, y_state], dim=-1))
+
+            heading_state = heading_state + omega[:, :, t] * dt
+            speed_state = torch.clamp_min(speed_state + accel[:, :, t] * dt, 0.0)
+
+        traj_xy = torch.stack(xy_steps, dim=2) / self.future_scale  # (B, K, T, 2)
+        return traj_xy.reshape(traj_xy.size(0), -1)  # (B, K*T*2)
 
     def forward(self, x, t, stage):
         past, images, intent, future = x['PAST'], x['IMAGES'], x['INTENT'], x['FUTURE']
@@ -261,11 +293,12 @@ class DiffusionLTFMonocularModel(nn.Module):
             waypoints = self.predict_waypoints(queries.squeeze(1))
             score = self.scorer(queries.view(past.size(0), -1))
             
-            return waypoints, score
+            return self.unwrap_preds(past, waypoints.unsqueeze(1), 1).view(-1, 20, 2), score
         else:
             device = past.device
             
             context = context.repeat_interleave(self.n_traj, dim=0)
+            past_unwrap = past.repeat_interleave(self.n_traj, dim=0)
 
             
             x_t = future.view(context.size(0), 20, 2)
@@ -286,17 +319,20 @@ class DiffusionLTFMonocularModel(nn.Module):
                 save_query = queries
                 step_output = self.scheduler.step(model_output=pred_original_sample, timestep=t_step, sample=x_t)
                 x_t = step_output.prev_sample
+                x_t = self.unwrap_preds(past_unwrap, x_t.unsqueeze(1), 1)
+                x_t = x_t.view(context.size(0), 20, 2)
             
 
             scores = self.scorer(save_query.view(x_t.size(0), -1))
-            x_t = x_t.view(past.size(0), -1, 20, 2)
             scores = scores.view(past.size(0), -1, 1)
+            x_t = x_t = x_t.view(past.size(0), -1, 20, 2)
+
 
             max_indices = torch.argmax(scores, dim=1)
             index_reshaped = max_indices.view(past.size(0), 1, 1, 1).expand(past.size(0), 1, 20, 2)
             predicted_x_t = torch.gather(x_t, 1, index_reshaped)
 
-            return predicted_x_t 
+            return predicted_x_t
     
     def encode_future(self, future, t):
         future = self.future_project(future) + self.future_embeddings.to(future.device) + self.time_embed(t).unsqueeze(1)

@@ -66,11 +66,15 @@ slurm-10273351 - add ade loss w/ increased noise -> 1.800
 
 slurm-10275302 - add ade loss w/ increased noise (all correct) - 1.97
 
+// issue of double dividing anchor clusters - should rerun
+slurm-10275406 - Select closest anchor to cluster - 1.67
+slurm-10275409 - Select closest anchor to cluster ( reduced noise) - 1.840
 
-slurm-10275406 - Select closest anchor to cluster
-slurm-10275409 - Select closest anchor to cluster ( reduced noise)
+slurm-10284424 - bycicle trajectory unwraping (reduced noise)
+slurm-10284425 - bycicle trajectory unwraping 
 
 
-bycicle trajectory unwraping
+try a scoring model that just takes in intent and past and future
 try 3 cameras
+better noise
 reduce learning rate?
