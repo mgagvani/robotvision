@@ -102,7 +102,7 @@ class DiffuseLitModel(pl.LightningModule):
         past = past / self.past_scale
         future_norm = future / self.future_scale
 
-        scaler = 0.2
+        scaler = 1
 
         if stage == "train":
             noise = torch.randn(future.size(0), 20, 2, device=past.device) * scaler
@@ -127,8 +127,15 @@ class DiffuseLitModel(pl.LightningModule):
             # target = noise
 
             pred_reconstruct = pred_x0*self.future_scale
-            mask = timesteps > 900
-            score_loss= F.mse_loss(torch.mean(torch.norm(pred_reconstruct- future, dim=-1), dim=1)*mask, score.view(-1)*mask)
+            err = torch.mean(torch.norm(pred_reconstruct - future, dim=-1), dim=1)  # [B]
+            pred_score = score.view(-1)                                              # [B]
+            mask = timesteps > 900                                                    # [B], bool
+
+            if mask.any():
+                score_loss = F.mse_loss(pred_score[mask], err[mask])
+            else:
+                score_loss = pred_score.new_tensor(0.0)
+
             # print(torch.norm(pred_reconstruct- future, dim=-1))
             # print(torch.mean(torch.norm(pred_reconstruct- future, dim=-1), dim=1).shape, score.view(-1))
             # print(score_loss)
@@ -328,7 +335,7 @@ class DiffusionLTFMonocularModel(nn.Module):
             x_t = x_t = x_t.view(past.size(0), -1, 20, 2)
 
 
-            max_indices = torch.argmax(scores, dim=1)
+            max_indices = torch.argmin(scores, dim=1)
             index_reshaped = max_indices.view(past.size(0), 1, 1, 1).expand(past.size(0), 1, 20, 2)
             predicted_x_t = torch.gather(x_t, 1, index_reshaped)
 
