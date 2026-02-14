@@ -102,7 +102,7 @@ class DiffuseLitModel(pl.LightningModule):
         past = past / self.past_scale
         future_norm = future / self.future_scale
 
-        scaler = 1
+        scaler = 0.2
 
         if stage == "train":
             noise = torch.randn(future.size(0), 20, 2, device=past.device) * scaler
@@ -238,7 +238,6 @@ class DiffusionLTFMonocularModel(nn.Module):
 
     def unwrap_preds(self, past, control_pred, n_proposals, max_accel: float = 8.0, max_omega: float = 1.0, dt = 0.25):
         past = past * self.past_scale
-        control_pred = control_pred * self.future_scale
 
         accel = torch.tanh(control_pred[..., 0]) * max_accel  # (B, K, T)
         omega = torch.tanh(control_pred[..., 1]) * max_omega  # (B, K, T)
@@ -315,12 +314,13 @@ class DiffusionLTFMonocularModel(nn.Module):
                     queries = block(queries, context)
 
                 
-                pred_original_sample = self.predict_waypoints(queries)
+                controls = self.predict_waypoints(queries)
+                pred_original_sample = self.unwrap_preds(
+                    past_unwrap, controls.unsqueeze(1), 1
+                ).view(context.size(0), 20, 2)
                 save_query = queries
                 step_output = self.scheduler.step(model_output=pred_original_sample, timestep=t_step, sample=x_t)
                 x_t = step_output.prev_sample
-                x_t = self.unwrap_preds(past_unwrap, x_t.unsqueeze(1), 1)
-                x_t = x_t.view(context.size(0), 20, 2)
             
 
             scores = self.scorer(save_query.view(x_t.size(0), -1))

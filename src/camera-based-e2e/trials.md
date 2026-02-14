@@ -70,8 +70,8 @@ slurm-10275302 - add ade loss w/ increased noise (all correct) - 1.97
 slurm-10275406 - Select closest anchor to cluster - 1.67
 slurm-10275409 - Select closest anchor to cluster ( reduced noise) - 1.840
 
-slurm-10284424 - bycicle trajectory unwraping (reduced noise)
-slurm-10284425 - bycicle trajectory unwraping 
+slurm-10284823 - bycicle trajectory unwraping - 1.56
+slurm-10284887 - bycicle trajectory unwraping (reduced noise) 
 
 
 try a scoring model that just takes in intent and past and future
