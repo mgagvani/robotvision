@@ -12,6 +12,33 @@ import argparse
 from typing import List
 import math
 from tqdm import tqdm
+import torchvision
+
+
+def decode_batch_jpeg(images_jpeg: list[list[torch.Tensor]], device: torch.device) -> list[torch.Tensor]:
+    """Decode batched JPEG bytes into per-camera tensors on device."""
+    flat_encoded = []
+    cam_sizes = []
+    for cam in images_jpeg:
+        cam_sizes.append(len(cam))
+        flat_encoded.extend(
+            jpg if isinstance(jpg, torch.Tensor) else torch.frombuffer(memoryview(jpg), dtype=torch.uint8)
+            for jpg in cam
+        )
+
+    flat_decoded = torchvision.io.decode_jpeg(
+        flat_encoded,
+        mode=torchvision.io.ImageReadMode.UNCHANGED,
+        device=device,
+    )
+
+    out = []
+    idx = 0
+    for n in cam_sizes:
+        cam_list = flat_decoded[idx:idx + n]
+        idx += n
+        out.append(torch.stack(cam_list, dim=0))
+    return out
 
 def load_model(checkpoint_path: str, device: torch.device = None) -> DeepMonocularModel:
     """Load a trained MonocularModel from a checkpoint.
@@ -74,7 +101,12 @@ def generate_submission_data(
     with torch.inference_mode():
         for batch in tqdm(data_loader, desc="Generating submission predictions"):
             past = batch['PAST'].to(device, non_blocking=True)
-            images = [img.to(device, non_blocking=True) for img in batch['IMAGES']]
+            if "IMAGES_JPEG" in batch:
+                images = decode_batch_jpeg(batch["IMAGES_JPEG"], device)
+            elif "IMAGES" in batch:
+                images = [img.to(device, non_blocking=True) for img in batch["IMAGES"]]
+            else:
+                raise KeyError("Batch must contain either 'IMAGES_JPEG' or 'IMAGES'.")
             intent = batch['INTENT'].to(device, non_blocking=True)
             names = batch['NAME']  # List of strings, keep on CPU
             

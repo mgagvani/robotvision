@@ -132,7 +132,6 @@ DATA_DIR = "/scratch/gilbreth/mgagvani/wod/waymo_open_dataset_end_to_end_camera_
 train_dataset = WaymoE2E(
     indexFile="index_train.pkl",
     data_dir=DATA_DIR,
-    images=True,
     n_items=2500, 
     seed=42,
 )

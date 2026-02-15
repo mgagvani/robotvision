@@ -60,7 +60,7 @@ if __name__ == "__main__":
     sys.path.append(str(project_root))
 
     from loader import WaymoE2E
-    loader = WaymoE2E(indexFile="index_val.pkl", data_dir="/anvil/scratch/x-mgagvani/wod/waymo_end_to_end_camera_v1_0_0/waymo_open_dataset_end_to_end_camera_v_1_0_0/", images=True)
+    loader = WaymoE2E(indexFile="index_val.pkl", data_dir="/anvil/scratch/x-mgagvani/wod/waymo_end_to_end_camera_v1_0_0/waymo_open_dataset_end_to_end_camera_v_1_0_0/")
     data_iterator = iter(torch.utils.data.DataLoader(loader, batch_size=8, num_workers=4))
 
     device = torch.device("cuda")
