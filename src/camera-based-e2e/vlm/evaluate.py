@@ -135,7 +135,6 @@ if __name__ == "__main__":
     dataset = WaymoE2E(
         indexFile="index_val.pkl",
         data_dir=DATA_DIR,
-        images=True,
         n_items=50, 
         seed=42,
     )

@@ -16,11 +16,9 @@ class WaymoE2E(IterableDataset):
         self,
         indexFile = 'index.pkl',
         data_dir='./dataset',
-        images = True,
         n_items: Optional[int] = None,
         seed: Optional[int] = None,
     ):
-        self.images = images
         self.data_dir = data_dir
         self.seed = seed
 

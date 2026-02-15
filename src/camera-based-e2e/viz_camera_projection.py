@@ -165,11 +165,10 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import numpy as np
 import torch
-import torch.nn.functional as F
 from PIL import Image
 from tqdm import tqdm
 
-from protos import e2e_pb2, dataset_pb2
+from protos import e2e_pb2
 from models.monocular import DeepMonocularModel
 from models.feature_extractors import SAMFeatures
 

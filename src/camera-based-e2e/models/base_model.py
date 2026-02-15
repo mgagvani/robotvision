@@ -46,7 +46,7 @@ class LitModel(pl.LightningModule):
         return out
 
 
-    def decode_batch_nvjpeg(self, images_jpeg: list[list[torch.Tensor]]) -> list[torch.Tensor]:
+    def decode_batch_jpeg(self, images_jpeg: list[list[torch.Tensor]]) -> list[torch.Tensor]:
         # Flatten cameras
         flat_encoded, cam_sizes = [], []
         for cam in images_jpeg:
@@ -181,7 +181,7 @@ class LitModel(pl.LightningModule):
 
         if "IMAGES_JPEG" in batch:
             images_jpeg = batch["IMAGES_JPEG"]
-            images = self.decode_batch_nvjpeg(images_jpeg)
+            images = self.decode_batch_jpeg(images_jpeg)
         elif "IMAGES" in batch:
             images = batch["IMAGES"]
         else:
