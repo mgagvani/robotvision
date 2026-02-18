@@ -45,7 +45,8 @@ class WaymoE2E(IterableDataset):
         return int(os.environ.get("RANK", "0")), int(os.environ.get("WORLD_SIZE", "1"))
 
     def __len__(self):
-        return len(self.indexes)
+        _, world_size = self.global_rank()
+        return len(self.indexes) // world_size
     
     def __iter__(self):
         worker = torch.utils.data.get_worker_info()
