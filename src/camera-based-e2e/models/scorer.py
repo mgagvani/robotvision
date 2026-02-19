@@ -30,6 +30,7 @@ class ScorerModel(nn.Module):
         self,
         feature_extractor,
         out_dim,
+        **kwargs, # accept kwargs so we can pass in random things
     ):
         super().__init__()
         self.cfg = ScorerConfig()
