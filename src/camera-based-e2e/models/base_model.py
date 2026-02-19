@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 import torchvision
+from dataclasses import asdict, is_dataclass
 
 from .losses.depth_loss import DepthLoss
 
@@ -24,9 +25,31 @@ class LitModel(pl.LightningModule):
     def __init__(self, model: nn.Module, lr: float, lr_vision: float | None = None, rfs_weight: float = 0.0):
         super(LitModel, self).__init__()
         self.model = model
-        self.hparams.lr = lr
-        self.hparams.lr_vision = lr_vision
-        self.hparams.rfs_weight = rfs_weight
+
+        # If we are using ScorerModel, which has a cfg, then save the attributes of the cfg as hparams, so they go into wandb
+        cfg = getattr(model, "cfg", None)
+        if cfg is None:
+            cfg_dict = {}
+        elif is_dataclass(cfg):
+            cfg_dict = asdict(cfg)
+        elif isinstance(cfg, dict):
+            cfg_dict = dict(cfg)
+        else:
+            try:
+                cfg_dict = dict(vars(cfg))
+            except TypeError:
+                cfg_dict = {"repr": repr(cfg)}
+
+        hparams = {
+            "lr": lr,
+            "lr_vision": lr_vision,
+            "rfs_weight": rfs_weight,
+            "model_name": model.__class__.__name__,
+            "model_cfg": cfg_dict,
+        }
+        for k, v in cfg_dict.items():
+            if isinstance(v, (int, float, str, bool)) or v is None:
+                hparams[f"model_cfg_{k}"] = v
 
         self.example_input_array = ({
             'PAST': torch.zeros((1, 16, 6)),  # PAST
@@ -34,7 +57,7 @@ class LitModel(pl.LightningModule):
             'INTENT': torch.tensor([1.0]),  # INTENT
         },)
 
-        self.save_hyperparameters()
+        self.save_hyperparameters(hparams, ignore=["model"])
 
     # --- Data Loading ---- 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
