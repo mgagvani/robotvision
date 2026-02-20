@@ -19,6 +19,7 @@ class ScorerConfig:
     pe_num_layers: int = 2
     pe_num_heads: int = 8
     pe_d_ffn: int = 4096
+    n_heads: int = 8
 
 
 class ScorerModel(nn.Module):
@@ -44,10 +45,12 @@ class ScorerModel(nn.Module):
             raise ValueError(f"ScorerModel expects state_size=2 for (x, y), got {self.cfg.state_size}")
         self.horizon = out_dim // 2
 
+        h, w = self.features.data_config["input_size"][1:]
+        self.n_img_tokens = (h // self.features.patch_size) * (w // self.features.patch_size)
+
         # Perception encoder: image tokens + learnable scene registers from DrivoR
         self.scene_embeds = nn.Parameter(
-            torch.randn(1, self.cfg.num_scene_tokens, self.d_features) * 1e-6,
-            requires_grad=True,
+            nn.init.trunc_normal_(torch.zeros((1, self.cfg.num_scene_tokens, self.d_features)), std=0.02),
         )
         pe_layer = nn.TransformerEncoderLayer(
             d_model=self.d_features,
@@ -62,6 +65,7 @@ class ScorerModel(nn.Module):
             num_layers=self.cfg.pe_num_layers,
             norm=nn.LayerNorm(self.d_features),
         )
+        self.pe_pos_embed = nn.Parameter(nn.init.trunc_normal_(torch.zeros((1, self.n_img_tokens + self.cfg.num_scene_tokens, self.d_features)), std=0.02))        
         self.pe_proj = nn.Linear(self.d_features, self.cfg.d_model)
 
         # Proposal generator
@@ -70,7 +74,7 @@ class ScorerModel(nn.Module):
         self.traj_decoder = TransformerDecoder(
             num_layers=self.cfg.ref_num,
             dim=self.cfg.d_model,
-            num_heads=1,
+            num_heads=self.cfg.n_heads,
         )
         self.traj_heads = nn.ModuleList(
             [
@@ -83,7 +87,7 @@ class ScorerModel(nn.Module):
         self.scorer_decoder = TransformerDecoderScorer(
             num_layers=self.cfg.scorer_ref_num,
             dim=self.cfg.d_model,
-            num_heads=1,
+            num_heads=self.cfg.n_heads,
         )
         self.pos_embed = MLP(self.horizon * self.cfg.state_size, self.cfg.d_ffn, self.cfg.d_model)
         self.scorer = MLP(self.cfg.d_model, self.cfg.d_ffn, 1)
@@ -110,7 +114,7 @@ class ScorerModel(nn.Module):
         tokens = self._extract_tokens(front_cam)  # (B, N, d_features)
         scene_tokens = self.scene_embeds.expand(B, -1, -1)  # (B, S, d_features)
         pe_inputs = torch.cat([tokens, scene_tokens], dim=1)  # (B, N + S, d_features)
-        scene_features = self.perception_encoder(pe_inputs)  # (B, N + S, d_features)
+        scene_features = self.perception_encoder(pe_inputs + self.pe_pos_embed)  # (B, N + S, d_features)
         scene_features = self.pe_proj(scene_features)  # (B, N + S, d_model)
 
         # token conditioning on intent and past states

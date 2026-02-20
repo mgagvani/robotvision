@@ -47,7 +47,7 @@ if __name__ == "__main__":
 
     # We don't want to save logs or checkpoints in the home directory - it'll fill up fast
     base_path = Path(args.data_dir).parent.as_posix()
-    timestamp = f"camera_e2e_{datetime.now().strftime('%Y%m%d_%H%M')}"
+    timestamp = f"scorer_e2e_{datetime.now().strftime('%Y%m%d_%H%M')}"
     wandb_logger = WandbLogger(name=timestamp, save_dir=base_path + "/logs", project="robotvision", log_model=True)
     wandb_logger.watch(lit_model, log="all")
 
