@@ -20,12 +20,17 @@ class ScorerConfig:
     pe_num_heads: int = 8
     pe_d_ffn: int = 4096
     n_heads: int = 8
+    n_cameras: int = 3
 
 
 class ScorerModel(nn.Module):
     """
     Multi-proposal trajectory generator + proposal scorer.
     """
+    HORIZON = 20
+    DT = 0.25
+    MAX_ACCEL = 8.0
+    MAX_OMEGA = 1.0
 
     def __init__(
         self,
@@ -39,6 +44,9 @@ class ScorerModel(nn.Module):
         self.d_features = sum(self.features.dims)
         self.n_proposals = self.cfg.proposal_num
 
+        # F, FL, FR, R, L, R, BL, BR respectively. choose the first n_cameras
+        self.cameras = [1, 2, 3, 7, 4, 5, 6, 8][: self.cfg.n_cameras] 
+
         if out_dim % 2 != 0:
             raise ValueError(f"out_dim must be even for (x,y) rollout, got {out_dim}")
         if self.cfg.state_size != 2:
@@ -50,7 +58,7 @@ class ScorerModel(nn.Module):
 
         # Perception encoder: image tokens + learnable scene registers from DrivoR
         self.scene_embeds = nn.Parameter(
-            nn.init.trunc_normal_(torch.zeros((1, self.cfg.num_scene_tokens, self.d_features)), std=0.02),
+            nn.init.trunc_normal_(torch.zeros((1, self.cfg.n_cameras, self.cfg.num_scene_tokens, self.d_features)), std=0.02),
         )
         pe_layer = nn.TransformerEncoderLayer(
             d_model=self.d_features,
@@ -92,30 +100,65 @@ class ScorerModel(nn.Module):
         self.pos_embed = MLP(self.horizon * self.cfg.state_size, self.cfg.d_ffn, self.cfg.d_model)
         self.scorer = MLP(self.cfg.d_model, self.cfg.d_ffn, 1)
 
-    def _extract_tokens(self, front_cam: torch.Tensor) -> torch.Tensor:
+    def extract_tokens(self, cameras: torch.Tensor) -> torch.Tensor:
         '''
         separate function to flatten vit features
         '''
-        feats_vit = self.features(front_cam)  # list/tuple or tensor
+        B, N, C, H, W = cameras.shape  # (B, n_cameras, 3, H, W)
+        cam_inputs = cameras.reshape(B * N, C, H, W)  
+        feats_vit = self.features(cam_inputs)  # list/tuple or tensor
         if isinstance(feats_vit, (list, tuple)):
             feats_vit = torch.cat([f.flatten(2) for f in feats_vit], dim=1)  # (B, C_total, N)
         else:
             feats_vit = feats_vit.flatten(2)  # (B, C, N)
-        return feats_vit.permute(0, 2, 1)  # (B, N, d_features)
+        tokens = feats_vit.permute(0, 2, 1)  
+        T = tokens.shape[1]
+        return tokens.reshape(B, N, T, self.d_features)
+    
+    def bicycle_model(self, control_pred, past):    
+        accel = torch.tanh(control_pred[..., 0]) * self.MAX_ACCEL  # (B, K, T)
+        omega = torch.tanh(control_pred[..., 1]) * self.MAX_OMEGA  # (B, K, T)
+
+        x_state = past[:, -1, 0].unsqueeze(1).expand(-1, self.n_proposals).clone()
+        y_state = past[:, -1, 1].unsqueeze(1).expand(-1, self.n_proposals).clone()
+        vx0 = past[:, -1, 2]
+        vy0 = past[:, -1, 3]
+        speed_state = torch.sqrt(vx0 * vx0 + vy0 * vy0 + 1e-8).unsqueeze(1).expand(-1, self.n_proposals).clone()
+        heading_state = torch.atan2(vy0, vx0).unsqueeze(1).expand(-1, self.n_proposals).clone()
+
+        xy_steps = []
+        for t in range(self.HORIZON):
+            x_state = x_state + speed_state * torch.cos(heading_state) * self.DT
+            y_state = y_state + speed_state * torch.sin(heading_state) * self.DT
+            xy_steps.append(torch.stack([x_state, y_state], dim=-1))
+
+            heading_state = heading_state + omega[:, :, t] * self.DT
+            speed_state = torch.clamp_min(speed_state + accel[:, :, t] * self.DT, 0.0)
+
+        traj_xy = torch.stack(xy_steps, dim=2)  # (B, K, T, 2)
+        traj_pred = traj_xy.reshape(traj_xy.size(0), -1)  # (B, K*T*2)
+        return traj_pred
 
     def forward(self, x):
         # past: (B, 16, 6), intent: int
         past, images, intent = x["PAST"], x["IMAGES"], x["INTENT"]
         B = past.size(0)
 
-        front_cam = images[1]  # (B, 3, H, W)
+        camera_images = torch.stack([images[i] for i in self.cameras], axis=1)  # (B, n_cameras, 3, H, W)
 
         # perception encoding
-        tokens = self._extract_tokens(front_cam)  # (B, N, d_features)
-        scene_tokens = self.scene_embeds.expand(B, -1, -1)  # (B, S, d_features)
-        pe_inputs = torch.cat([tokens, scene_tokens], dim=1)  # (B, N + S, d_features)
-        scene_features = self.perception_encoder(pe_inputs + self.pe_pos_embed)  # (B, N + S, d_features)
-        scene_features = self.pe_proj(scene_features)  # (B, N + S, d_model)
+        tokens = self.extract_tokens(camera_images)  # (B, N, T, d_features)
+        N, S = tokens.shape[1], self.cfg.num_scene_tokens
+        scene_tokens = self.scene_embeds.expand(B, -1, -1, -1)  # (B, N, S, d_features)
+        
+        pe_inputs = torch.cat([tokens, scene_tokens], dim=2)  # (B, N, T+S, d_features)
+        pe_inputs = pe_inputs + self.pe_pos_embed.unsqueeze(1)  # Add pos_embed before flattening
+        pe_inputs = pe_inputs.view(B * N, -1, self.d_features)  # per camera attention. do not want attending across cameras
+        
+        scene_features = self.perception_encoder(pe_inputs)  # (B*N, T+S, d_features)
+        scene_features = scene_features[:, -S:, :].reshape(B, N * S, self.d_features)  # Extract scene tokens
+        
+        scene_features = self.pe_proj(scene_features)  # (B, N*S, d_model)
 
         # token conditioning on intent and past states
         intent_idx = (intent.long() - 1).clamp(min=0, max=2)
@@ -146,7 +189,8 @@ class ScorerModel(nn.Module):
         scorer_out = scorer_out + ego_token
         score_pred = self.scorer(scorer_out).squeeze(-1)  # (B, K)
 
-        trajectory = proposals.reshape(B, -1)  # (B, K*T*2)
+        # trajectory = proposals.reshape(B, -1)  # (B, K*T*2)
+        trajectory = self.bicycle_model(proposals, past)  # (B, K*T*2) use bicycle model to constrain output
 
         return {
             "trajectory": trajectory,
