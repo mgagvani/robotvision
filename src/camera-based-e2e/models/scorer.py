@@ -148,7 +148,7 @@ class ScorerModel(nn.Module):
 
         # perception encoding
         tokens = self.extract_tokens(camera_images)  # (B, N, T, d_features)
-        N, S = tokens.shape[1], self.cfg.num_scene_tokens
+        N, S, T = tokens.shape[1], self.cfg.num_scene_tokens, tokens.shape[2]
         scene_tokens = self.scene_embeds.expand(B, -1, -1, -1)  # (B, N, S, d_features)
         
         pe_inputs = torch.cat([tokens, scene_tokens], dim=2)  # (B, N, T+S, d_features)
@@ -156,9 +156,9 @@ class ScorerModel(nn.Module):
         pe_inputs = pe_inputs.view(B * N, -1, self.d_features)  # per camera attention. do not want attending across cameras
         
         scene_features = self.perception_encoder(pe_inputs)  # (B*N, T+S, d_features)
-        scene_features = scene_features[:, -S:, :].reshape(B, N * S, self.d_features)  # Extract scene tokens
-        
-        scene_features = self.pe_proj(scene_features)  # (B, N*S, d_model)
+        scene_features = scene_features.reshape(B, N, T + S, self.d_features).reshape(B, N * (T + S), self.d_features)
+
+        scene_features = self.pe_proj(scene_features)  # (B, N*(T+S), d_model)
 
         # token conditioning on intent and past states
         intent_idx = (intent.long() - 1).clamp(min=0, max=2)
