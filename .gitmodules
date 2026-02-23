@@ -1,3 +1,6 @@
 [submodule "src/camera-based-e2e/models/transfuser"]
 	path = src/camera-based-e2e/models/transfuser
 	url = https://github.com/mgagvani/transfuser.git
+[submodule "src/camera-based-e2e/models/lead"]
+	path = src/camera-based-e2e/models/lead
+	url = https://github.com/autonomousvision/lead.git
