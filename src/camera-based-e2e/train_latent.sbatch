@@ -4,11 +4,11 @@
 #SBATCH --error=waymo-e2e-latent-%j.err
 
 #SBATCH --account=csso
-#SBATCH --partition=v100
+#SBATCH --partition=a10
 #SBATCH --gres=gpu:1
 #SBATCH --time=24:00:00
 #SBATCH --mem=64G
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=5
 
 # ---- Optional: pass an index file as the first sbatch arg ----
 # Example:

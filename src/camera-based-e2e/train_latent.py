@@ -15,7 +15,7 @@ from pathlib import Path
 from loader import WaymoE2E
 
 # Replace with your model defined in models/
-from models.transfuser.team_code_transfuser.latentTF import LatentTFModel
+from models.transfuser.team_code_transfuser.latentTF_depth import LatentTFModel
 from models.base_model import collate_with_images
 from models.transfuser.team_code_transfuser.config import GlobalConfig
 

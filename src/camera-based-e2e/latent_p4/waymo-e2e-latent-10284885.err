@@ -1,0 +1,72 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Using bfloat16 Automatic Mixed Precision (AMP)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+You are using a CUDA device ('NVIDIA A10') that has Tensor Cores. To properly utilize them, you should set `torch.set_float32_matmul_precision('medium' | 'high')` which will trade-off precision for performance. For more details, read https://pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html#torch.set_float32_matmul_precision
+/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pytorch_lightning/callbacks/model_checkpoint.py:881: Checkpoint directory /scratch/gilbreth/shar1159/checkpoints exists and is not empty.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pytorch_lightning/utilities/model_summary/model_summary.py:242: Precision bf16-mixed is not supported by the model summary.  Estimated model size in MB will not be accurate. Using 32 bits instead.
+
+  | Name     | Type             | Params | Mode  | FLOPs
+--------------------------------------------------------------
+0 | backbone | latentTFBackbone | 66.2 M | train | 0    
+1 | head     | Sequential       | 169 K  | train | 0    
+--------------------------------------------------------------
+66.4 M    Trainable params
+0         Non-trainable params
+66.4 M    Total params
+265.467   Total estimated model params size (MB)
+779       Modules in train mode
+0         Modules in eval mode
+0         Total Flops
+SLURM auto-requeueing enabled. Setting signal handlers.
+/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pytorch_lightning/utilities/data.py:123: Your `IterableDataset` has `__len__` defined. In combination with multi-process data loading (when num_workers > 1), `__len__` could be inaccurate if each worker is not configured independently to avoid having duplicate data.
+/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pytorch_lightning/utilities/data.py:79: Trying to infer the `batch_size` from an ambiguous collection. The batch size we found is 16. To avoid any miscalculations, use `self.log(..., batch_size=batch_size)`.
+/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pytorch_lightning/utilities/data.py:79: Trying to infer the `batch_size` from an ambiguous collection. The batch size we found is 8. To avoid any miscalculations, use `self.log(..., batch_size=batch_size)`.
+`Trainer.fit` stopped: `max_epochs=10` reached.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+SLURM auto-requeueing enabled. Setting signal handlers.
+Traceback (most recent call last):
+  File "/scratch/gilbreth/shar1159/robotvision/src/camera-based-e2e/train_latent.py", line 141, in <module>
+    trainer.test(lit_model, dataloaders=test_loader)
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pytorch_lightning/trainer/trainer.py", line 821, in test
+    return call._call_and_handle_interrupt(
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pytorch_lightning/trainer/call.py", line 49, in _call_and_handle_interrupt
+    return trainer_fn(*args, **kwargs)
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pytorch_lightning/trainer/trainer.py", line 864, in _test_impl
+    results = self._run(model, ckpt_path=ckpt_path, weights_only=weights_only)
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pytorch_lightning/trainer/trainer.py", line 1079, in _run
+    results = self._run_stage()
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pytorch_lightning/trainer/trainer.py", line 1116, in _run_stage
+    return self._evaluation_loop.run()
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pytorch_lightning/loops/utilities.py", line 179, in _decorator
+    return loop_run(self, *args, **kwargs)
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pytorch_lightning/loops/evaluation_loop.py", line 139, in run
+    batch, batch_idx, dataloader_idx = next(data_fetcher)
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pytorch_lightning/loops/fetchers.py", line 134, in __next__
+    batch = super().__next__()
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pytorch_lightning/loops/fetchers.py", line 61, in __next__
+    batch = next(self.iterator)
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pytorch_lightning/utilities/combined_loader.py", line 341, in __next__
+    out = next(self._iterator)
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/pytorch_lightning/utilities/combined_loader.py", line 142, in __next__
+    out = next(self.iterators[0])
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 701, in __next__
+    data = self._next_data()
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 1445, in _next_data
+    return self._process_data(data)
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 1491, in _process_data
+    data.reraise()
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/torch/_utils.py", line 715, in reraise
+    raise exception
+FileNotFoundError: Caught FileNotFoundError in DataLoader worker process 1.
+Original Traceback (most recent call last):
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/torch/utils/data/_utils/worker.py", line 351, in _worker_loop
+    data = fetcher.fetch(index)  # type: ignore[possibly-undefined]
+  File "/scratch/gilbreth/shar1159/conda_envs/waymo/lib/python3.10/site-packages/torch/utils/data/_utils/fetch.py", line 33, in fetch
+    data.append(next(self.dataset_iter))
+  File "/scratch/gilbreth/shar1159/robotvision/src/camera-based-e2e/loader.py", line 77, in __iter__
+    self.file = open(os.path.join(self.data_dir, filename), 'rb')
+FileNotFoundError: [Errno 2] No such file or directory: '/scratch/gilbreth/shar1159/waymo_open_dataset_end_to_end_camera_v_1_0_0/test_202504211836-202504220845.tfrecord-00014-of-00266'
+
+srun: error: gilbreth-h004: task 0: Exited with exit code 1

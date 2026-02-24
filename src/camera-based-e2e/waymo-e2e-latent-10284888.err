@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/scratch/gilbreth/shar1159/robotvision/src/camera-based-e2e/train_latent.py", line 18, in <module>
+    from models.transfuser.team_code_transfuser.latentTF_depth import LatentTFModel
+  File "/scratch/gilbreth/shar1159/robotvision/src/camera-based-e2e/models/transfuser/team_code_transfuser/latentTF_depth.py", line 9, in <module>
+    from losses.depth_loss import DepthLoss
+ModuleNotFoundError: No module named 'losses'
+srun: error: gilbreth-h000: task 0: Exited with exit code 1

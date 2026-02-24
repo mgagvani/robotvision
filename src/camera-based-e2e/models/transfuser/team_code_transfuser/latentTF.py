@@ -12,7 +12,7 @@ def res_transform(front: torch.Tensor,
                     front_right: torch.Tensor) -> torch.Tensor:
     """
     input: [B, 3, H, W], uint8 or float
-    return: [B, 3, 480, 960]
+    return: [B, 3, 480, 960]`
     """
 
     def _to_bchw(x):
