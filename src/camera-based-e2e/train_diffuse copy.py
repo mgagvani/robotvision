@@ -130,22 +130,33 @@ class DiffuseLitModel(pl.LightningModule):
             
             model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent, 'FUTURE': future_noisy}
             
-            pred_x0 = self.model(model_inputs, timesteps, stage)
+            pred_x0, score = self.model(model_inputs, timesteps, stage)
 
             
             target = future_norm#.view(future_norm.size(0), -1) # for x0
             # target = noise.view(noise.size(0), -1) # for noise
             # target = noise
 
+            pred_reconstruct = pred_x0.detach()
             #normalized so that the loss scales are the same
+            err = torch.mean(torch.norm(pred_reconstruct - future_norm, dim=-1), dim=1)  # [B]
+            pred_score = score.view(-1)                                              # [B]
+            mask = timesteps < 400                                                    # [B], bool
+
+            if mask.any():
+                score_loss = F.mse_loss(pred_score[mask], err[mask])
+            else:
+                score_loss = pred_score.new_tensor(0.0)
+
             # print(torch.norm(pred_reconstruct- future, dim=-1))
             # print(torch.mean(torch.norm(pred_reconstruct- future, dim=-1), dim=1).shape, score.view(-1))
             # print(score_loss)
 
             recon_loss = F.mse_loss(pred_x0, target)
-            loss = recon_loss
+            loss = recon_loss + score_loss
             
             self.log("train_recon_loss", recon_loss, prog_bar=True)
+            self.log("train_score_loss", score_loss, prog_bar=True)
 
         else:
             anchors = self.generate_anchors(self.n_traj).to(past.device, dtype=past.dtype)/self.future_scale
@@ -233,6 +244,15 @@ class DiffusionLTFMonocularModel(nn.Module):
             for _ in range(6)
         ])
 
+        # Scoring output from 
+        self.scorer = nn.Sequential(
+            nn.Linear(self.n_dims*20, self.n_dims),
+            nn.ReLU(),
+            nn.Linear(self.n_dims, self.n_dims),
+            nn.ReLU(),
+            nn.Linear(self.n_dims, 1)
+        )
+
         # Predict output waypoints
         self.predict_waypoints = nn.Sequential(
             nn.Linear(self.n_dims, self.n_dims),
@@ -292,10 +312,11 @@ class DiffusionLTFMonocularModel(nn.Module):
             for block in self.decoder_blocks:
                 queries = block(queries, context)
 
+
             waypoints = self.predict_waypoints(queries.squeeze(1))
+            score = self.scorer(queries.detach().view(past.size(0), -1))
             
-            return self.unwrap_preds(past, waypoints.unsqueeze(1), 1).view(-1, 20, 2)
-        
+            return self.unwrap_preds(past, waypoints.unsqueeze(1), 1).view(-1, 20, 2), score
         else:
             device = past.device
             
@@ -305,6 +326,7 @@ class DiffusionLTFMonocularModel(nn.Module):
             
             x_t = future.view(context.size(0), 20, 2)
 
+            save_query= None
 
             self.scheduler.set_timesteps(50, device=device)
             for t_step in self.scheduler.timesteps:
@@ -320,13 +342,21 @@ class DiffusionLTFMonocularModel(nn.Module):
                 pred_original_sample = self.unwrap_preds(
                     past_unwrap, controls.unsqueeze(1), 1
                 ).view(context.size(0), 20, 2)
+                save_query = queries
                 step_output = self.scheduler.step(model_output=pred_original_sample, timestep=t_step, sample=x_t)
                 x_t = step_output.prev_sample
             
 
-            x_t = x_t.view(past.size(0), -1, 20, 2)
+            scores = self.scorer(save_query.view(x_t.size(0), -1))
+            scores = scores.view(past.size(0), -1, 1)
+            x_t = x_t = x_t.view(past.size(0), -1, 20, 2)
 
-            return x_t
+
+            max_indices = torch.argmin(scores, dim=1)
+            index_reshaped = max_indices.view(past.size(0), 1, 1, 1).expand(past.size(0), 1, 20, 2)
+            predicted_x_t = torch.gather(x_t, 1, index_reshaped)
+
+            return predicted_x_t
     
     def encode_future(self, future, t):
         future = self.future_project(future) + self.future_embeddings.to(future.device) + self.time_embed(t).unsqueeze(1)
