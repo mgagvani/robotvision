@@ -146,11 +146,34 @@ Score_loss on 10k for these:
 
 Remove scoring !!! :)
 
+10333898 - Removed scoring and anchored gaussian
+10333976 - fixed n_dims having accidentally changed to 2560 - changed loss to ade - 1.47
+
+Better contextualization of future path in encoder, Maybe with the intent (that way it can force path to follow intent, but not rely on past)?
+    10334102 - 2 - Added the past + intent to the future query project (might over-rely on past, but idk) 1.52
+    10334135 - 3 - Added the intent to the future query project - 1.47
+        10336002 - 40% random nulling of past data - 1.59 - Failed removed
+        10335650 - random nulling of 50% past data - 1.54 - Failed removed
+        10337090 - random nulling of 0-100% past data (percent set for entire batch) - 1.59 - Failed removed
+
+Continue w/ 3 as base
+10338717 - 2 - 3 cameras
+ -  - No query-per-waypoint, all one query
+ -  - no query-per-waypoint, all x,y/theta,v each in their own query (so similar speeds accross the entire time step)
+
+
+
+
+
+    Things to try
+More Cameras
+multi-trajectory loss (to prevent trajectory averaging between valid trajectories)
+Break Cross attention into 2 stages, 2 with past tokens, 4 with visual tokens, or 3/3
+Data selection
+Data augmentation
+Large Past Dropout (heavy dropout for camera-learning-forcing) OR randomly zero out past input into model x% of the time
+object detection loss, depth loss, etc
+Gated Cross-Attention for visual CA
+
 10330130 - reworked scorer
 10330135 - slightly smaller scorer
-
-make scorer a transformer?
-better way to incorperate scoring loss?
-try more cameras
-better noise (a multiplicitive?)
-figure out if noisy trajectories are too noisy

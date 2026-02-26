@@ -188,7 +188,7 @@ class DiffusionLTFMonocularModel(nn.Module):
         self.scale_features = nn.Linear(self.feature_dim, self.n_dims)
         self.intent_embed = nn.Embedding(3, self.n_dims) # embed the different intents
         self.past_projection = nn.Linear(6, self.n_dims) # convert past waypoints to tokens
-        self.positional_encoding = nn.Parameter(nn.init.trunc_normal_(torch.zeros((1, self.n_tokens + 1 + 16, self.n_dims)), std=0.02))
+        self.positional_encoding = nn.Parameter(nn.init.trunc_normal_(torch.zeros((1, self.n_tokens * 3 + 1 + 16, self.n_dims)), std=0.02))
 
         # Future Query encoder
         self.time_embed = nn.Sequential(
@@ -256,14 +256,20 @@ class DiffusionLTFMonocularModel(nn.Module):
         past, images, intent, future = x['PAST'], x['IMAGES'], x['INTENT'], x['FUTURE']
         
         ### Get the visual tokens
-        cams = images[1] # front-left, front, front-right
-        with torch.no_grad():
-            feats = self.features(cams)
+        cams = images[:3] # front-left, front, front-right
+        visual_tokens = []
 
-        if isinstance(feats, (list, tuple)):
-            tokens = torch.cat([f.flatten(2) for f in feats], dim=1)
-        else:
-            tokens = feats.flatten(2)
+        for cam in cams:
+            with torch.no_grad():
+                feats = self.features(cam)
+
+            if isinstance(feats, (list, tuple)):
+                visual_tokens.append(torch.cat([f.flatten(2) for f in feats], dim=1))
+            else:
+                visual_tokens.append(feats.flatten(2))
+
+        tokens = torch.cat(visual_tokens, dim=-1)
+
         tokens = self.scale_features(torch.permute(tokens, (0, 2, 1)))
         
         ## Get intent embedding and past projection

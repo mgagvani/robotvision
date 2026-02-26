@@ -11,5 +11,5 @@
 module load cuda/12.6.0 anaconda
 conda activate /home/bnamikas/.conda/envs/2025.06-py313/python3.10
 
-srun python train_diffuse2.py \
+srun python train_diffuse3.py \
   --data_dir /scratch/gilbreth/bnamikas/data/waymo_open_dataset_end_to_end_camera_v_1_0_0 \
