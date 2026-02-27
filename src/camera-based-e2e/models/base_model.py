@@ -240,17 +240,14 @@ class LitModel(pl.LightningModule):
         pred = pred_future
         t_steps = future.shape[1]
         t2 = t_steps * 2
-        k_modes = self.model.n_proposals if hasattr(self.model, "n_proposals") else 1
 
         if pred.ndim != 2:
-            raise ValueError(f"Unexpected pred shape {pred.shape}; expected (B, T*2) or (B, {k_modes}*T*2).")
+            raise ValueError(f"Unexpected pred shape {pred.shape}; expected 2D (B, K*T*2).")
 
-        if pred.shape[1] == t2:
-            pred = pred.view(pred.size(0), 1, t_steps, 2)
-        elif pred.shape[1] == k_modes * t2:
-            pred = pred.view(pred.size(0), k_modes, t_steps, 2)
-        else:
-            raise ValueError(f"Unexpected pred shape {pred.shape}; expected (B, T*2) or (B, {k_modes}*T*2).")
+        if pred.shape[1] % t2 != 0:
+            raise ValueError(f"pred dim1={pred.shape[1]} is not divisible by T*2={t2}.")
+        k_modes = pred.shape[1] // t2
+        pred = pred.view(pred.size(0), k_modes, t_steps, 2)
 
         if pred_scores is not None and pred.size(1) > 1:
             rfs_pred_idx = pred_scores.argmin(dim=1)
@@ -272,8 +269,8 @@ class LitModel(pl.LightningModule):
         ade_per_mode = dist.mean(dim=-1)
 
         # Top-M WTA for trajectory loss. Here, we have an "oracle" that picks the best mode
-        # so, our loss is calculated on the mean of the top 5 trajectories.
-        top_m = min(5, ade_per_mode.size(1))
+        # so, our loss is calculated on the mean of the top n trajectories.
+        top_m = min(getattr(self.hparams, "model_cfg_loss_top_n", 5), ade_per_mode.size(1))
         loss_ade = ade_per_mode.topk(top_m, largest=False, dim=1).values.mean()
 
         # oracle ade is best of all proposals, since we have the GT data during training
@@ -321,7 +318,9 @@ class LitModel(pl.LightningModule):
             log_payload[f"{stage}_ade_pred"] = ade_pred
             log_payload[f"{stage}_ade_oracle"] = oracle_ade
             log_payload[f"{stage}_ade_regret"] = regret
-        self.log_dict(log_payload, prog_bar=True, logger=True)
+        self.log_dict(log_payload, prog_bar=True, logger=True,
+                      batch_size=past.size(0),
+                      sync_dist=(stage == "val"))
 
         return total_loss
     
