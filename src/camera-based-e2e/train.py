@@ -16,7 +16,7 @@ from loader import WaymoE2E
 
 # Replace with your model defined in models/ 
 from models.base_model import LitModel, collate_with_images
-from models.scorer import DrivoRModel
+from models.drivor import DrivoRModel
 from models.feature_extractors import SAMFeatures
     
 if __name__ == "__main__":
