@@ -23,7 +23,7 @@ class ScorerConfig:
     n_cameras: int = 3
 
 
-class ScorerModel(nn.Module):
+class DrivoRModel(nn.Module):
     """
     Multi-proposal trajectory generator + proposal scorer.
     """

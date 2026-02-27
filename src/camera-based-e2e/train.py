@@ -16,7 +16,7 @@ from loader import WaymoE2E
 
 # Replace with your model defined in models/ 
 from models.base_model import LitModel, collate_with_images
-from models.scorer import ScorerModel
+from models.scorer import DrivoRModel
 from models.feature_extractors import SAMFeatures
     
 if __name__ == "__main__":
@@ -40,7 +40,7 @@ if __name__ == "__main__":
     in_dim = 16 * 6  # Past: (B, 16, 6)
     out_dim = 20 * 2  # Future: (B, 20, 2)
 
-    model = ScorerModel(feature_extractor=SAMFeatures(model_name="timm/vit_pe_spatial_small_patch16_512.fb", frozen=True), out_dim=out_dim)
+    model = DrivoRModel(feature_extractor=SAMFeatures(model_name="timm/vit_pe_spatial_small_patch16_512.fb", frozen=True), out_dim=out_dim)
     if args.compile:
         model = torch.compile(model, mode="max-autotune")
     lit_model = LitModel(model=model, lr=args.lr)
