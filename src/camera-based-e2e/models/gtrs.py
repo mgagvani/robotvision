@@ -46,6 +46,11 @@ class GTRSModel(nn.Module):
         self.vocab_dim = self.vocab[0].numel()  # e.g. 80 timesteps * 2 = 160
         self.n_proposals = self.vocab.shape[0]
 
+        # out dim check
+        if out_dim is not None and out_dim // 2 == self.vocab.shape[1]:
+            raise ValueError(f"out_dim should be None or {self.vocab.shape[1] * 2}, but got {out_dim}")
+
+
         # conv 1
         self.down_conv = nn.Conv1d(self.d_features, self.cfg.d_model, 1, 1)
 
@@ -104,7 +109,7 @@ class GTRSModel(nn.Module):
         T = tokens.shape[1]
         return tokens.reshape(B, N, T, self.d_features) # (B, n_cameras, n_tokens, d_features)
 
-    def forward(self, x: dict[torch.Tensor]) -> dict[torch.Tensor]:
+    def forward(self, x: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         past, images, intent = x["PAST"], x["IMAGES"], x["INTENT"]
         B = past.size(0)
 
