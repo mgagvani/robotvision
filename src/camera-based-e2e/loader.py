@@ -94,6 +94,17 @@ class WaymoE2E(IterableDataset):
 
             yield {'PAST': past, 'FUTURE': future, 'IMAGES_JPEG': jpeg_tensors, 'INTENT': frame.intent, 'NAME': name}
 
+
+def collate_with_images(batch):
+    """Collate that keeps IMAGES_JPEG as a list-of-lists (variable-size JPEG
+    bytes cannot be stacked) and delegates everything else to default_collate."""
+    from torch.utils.data.dataloader import default_collate
+    images = [sample.pop('IMAGES_JPEG') for sample in batch]
+    collated = default_collate(batch)
+    collated['IMAGES_JPEG'] = images  # list[list[Tensor]], one inner list per sample
+    return collated
+
+
 if __name__ == "__main__":
 
     from torch.utils.data import DataLoader
@@ -102,12 +113,12 @@ if __name__ == "__main__":
     # NOTE: Replace with your path
     DATA_DIR = '/anvil/scratch/x-mgagvani/wod/waymo_end_to_end_camera_v1_0_0/waymo_open_dataset_end_to_end_camera_v_1_0_0'
     BATCH_SIZE = 256
-    dataset = WaymoE2E(indexFile="index_train.pkl", data_dir = DATA_DIR, images=True)
+    dataset = WaymoE2E(indexFile="index_train.pkl", data_dir = DATA_DIR)
     loader = DataLoader(
         dataset, 
         batch_size=BATCH_SIZE,
         num_workers=0,
-        # collate_fn=collate_with_images, # from models.base_model
+        collate_fn=collate_with_images,
         pin_memory=True, # causes error
     )
     # next(iter(loader))

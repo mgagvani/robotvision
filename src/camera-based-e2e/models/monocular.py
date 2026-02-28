@@ -152,6 +152,29 @@ class DeepMonocularModel(nn.Module):
             nn.Linear(self.feature_dim, 1),
         ) # no softmax, since we use cross entropy later
 
+    def bicycle_model(self, control_pred: torch.Tensor, past: torch.Tensor) -> torch.Tensor:
+        accel = torch.tanh(control_pred[..., 0]) * self.max_accel  # (B, K, T)
+        omega = torch.tanh(control_pred[..., 1]) * self.max_omega  # (B, K, T)
+
+        x_state = past[:, -1, 0].unsqueeze(1).expand(-1, self.n_proposals).clone()
+        y_state = past[:, -1, 1].unsqueeze(1).expand(-1, self.n_proposals).clone()
+        vx0 = past[:, -1, 2]
+        vy0 = past[:, -1, 3]
+        speed_state = torch.sqrt(vx0 * vx0 + vy0 * vy0 + 1e-6).unsqueeze(1).expand(-1, self.n_proposals).clone()
+        heading_state = torch.atan2(vy0, vx0).unsqueeze(1).expand(-1, self.n_proposals).clone()
+
+        xy_steps = []
+        for t in range(self.horizon):
+            x_state = x_state + speed_state * torch.cos(heading_state) * self.dt
+            y_state = y_state + speed_state * torch.sin(heading_state) * self.dt
+            xy_steps.append(torch.stack([x_state, y_state], dim=-1))
+
+            heading_state = heading_state + omega[:, :, t] * self.dt
+            speed_state = torch.clamp_min(speed_state + accel[:, :, t] * self.dt, 0.0)
+
+        traj_xy = torch.stack(xy_steps, dim=2)  # (B, K, T, 2)
+        return traj_xy, traj_xy.reshape(traj_xy.size(0), -1), accel, omega  # (B, K*T*2)
+
     def forward(self, x):
         # Copied from MonocularModel
         # past: (B, 16, 6), intent: int
@@ -192,27 +215,7 @@ class DeepMonocularModel(nn.Module):
         control_pred = self.traj_decoder(query.squeeze(1)).view(
             query.size(0), self.n_proposals, self.horizon, 2
         )  # (B, K, T, 2)
-        accel = torch.tanh(control_pred[..., 0]) * self.max_accel  # (B, K, T)
-        omega = torch.tanh(control_pred[..., 1]) * self.max_omega  # (B, K, T)
-
-        x_state = past[:, -1, 0].unsqueeze(1).expand(-1, self.n_proposals).clone()
-        y_state = past[:, -1, 1].unsqueeze(1).expand(-1, self.n_proposals).clone()
-        vx0 = past[:, -1, 2]
-        vy0 = past[:, -1, 3]
-        speed_state = torch.sqrt(vx0 * vx0 + vy0 * vy0 + 1e-6).unsqueeze(1).expand(-1, self.n_proposals).clone()
-        heading_state = torch.atan2(vy0, vx0).unsqueeze(1).expand(-1, self.n_proposals).clone()
-
-        xy_steps = []
-        for t in range(self.horizon):
-            x_state = x_state + speed_state * torch.cos(heading_state) * self.dt
-            y_state = y_state + speed_state * torch.sin(heading_state) * self.dt
-            xy_steps.append(torch.stack([x_state, y_state], dim=-1))
-
-            heading_state = heading_state + omega[:, :, t] * self.dt
-            speed_state = torch.clamp_min(speed_state + accel[:, :, t] * self.dt, 0.0)
-
-        traj_xy = torch.stack(xy_steps, dim=2)  # (B, K, T, 2)
-        traj_pred = traj_xy.reshape(traj_xy.size(0), -1)  # (B, K*T*2)
+        traj_xy, traj_pred, accel, omega = self.bicycle_model(control_pred, past)  # (B, K, T*2)
 
         traj_pred_flat = traj_xy.reshape(traj_xy.size(0), self.n_proposals, -1)  # (B, K, T*2)
         traj_feat: torch.Tensor = self.traj_features(traj_pred_flat.detach())  # (B, K, C)

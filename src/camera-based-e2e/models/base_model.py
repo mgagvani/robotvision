@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 import torchvision
+from dataclasses import asdict, is_dataclass
 
 from .losses.depth_loss import DepthLoss
 
@@ -24,9 +25,31 @@ class LitModel(pl.LightningModule):
     def __init__(self, model: nn.Module, lr: float, lr_vision: float | None = None, rfs_weight: float = 0.0):
         super(LitModel, self).__init__()
         self.model = model
-        self.hparams.lr = lr
-        self.hparams.lr_vision = lr_vision
-        self.hparams.rfs_weight = rfs_weight
+
+        # If we are using ScorerModel, which has a cfg, then save the attributes of the cfg as hparams, so they go into wandb
+        cfg = getattr(model, "cfg", None)
+        if cfg is None:
+            cfg_dict = {}
+        elif is_dataclass(cfg):
+            cfg_dict = asdict(cfg)
+        elif isinstance(cfg, dict):
+            cfg_dict = dict(cfg)
+        else:
+            try:
+                cfg_dict = dict(vars(cfg))
+            except TypeError:
+                cfg_dict = {"repr": repr(cfg)}
+
+        hparams = {
+            "lr": lr,
+            "lr_vision": lr_vision,
+            "rfs_weight": rfs_weight,
+            "model_name": model.__class__.__name__,
+            "model_cfg": cfg_dict,
+        }
+        for k, v in cfg_dict.items():
+            if isinstance(v, (int, float, str, bool)) or v is None:
+                hparams[f"model_cfg_{k}"] = v
 
         self.example_input_array = ({
             'PAST': torch.zeros((1, 16, 6)),  # PAST
@@ -34,32 +57,47 @@ class LitModel(pl.LightningModule):
             'INTENT': torch.tensor([1.0]),  # INTENT
         },)
 
-        self.save_hyperparameters()
+        self.save_hyperparameters(hparams, ignore=["model"])
 
     # --- Data Loading ---- 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
-        # move actual tensors
-        out = super().transfer_batch_to_device(batch, device, dataloader_idx)
-        # keep encoded JPEG bytes on cpu to decode later
+        # if not a dict, it's not actually proper training data, so delegate this to the super()class
+        if not isinstance(batch, dict):
+            return super().transfer_batch_to_device(batch, device, dataloader_idx)
+
+        # don't move images_jpeg to gpu, move the decoded images to gpu
         if "IMAGES_JPEG" in batch:
-            out["IMAGES_JPEG"] = batch["IMAGES_JPEG"]
-        return out
+            images_jpeg = batch["IMAGES_JPEG"]
+            batch_wo_jpeg = dict(batch)
+            batch_wo_jpeg.pop("IMAGES_JPEG", None)
+            moved = super().transfer_batch_to_device(batch_wo_jpeg, device, dataloader_idx)
+            moved["IMAGES"] = self.decode_batch_jpeg(images_jpeg, device=device)
+            return moved
+
+        return super().transfer_batch_to_device(batch, device, dataloader_idx)
 
 
-    def decode_batch_jpeg(self, images_jpeg: list[list[torch.Tensor]]) -> list[torch.Tensor]:
+    def decode_batch_jpeg(
+        self,
+        images_jpeg: list[list[torch.Tensor]],
+        device: torch.device | None = None,
+    ) -> list[torch.Tensor]:
+        decode_device = self.device if device is None else device
         # Flatten cameras
         flat_encoded, cam_sizes = [], []
         for cam in images_jpeg:
             cam_sizes.append(len(cam))
-            flat_encoded.extend(
-                jpg if isinstance(jpg, torch.Tensor) else torch.frombuffer(memoryview(jpg), dtype=torch.uint8)
-                for jpg in cam
-            )
+            for jpg in cam:
+                t = jpg if isinstance(jpg, torch.Tensor) else torch.frombuffer(memoryview(jpg), dtype=torch.uint8)
+                # decode_jpeg requires the raw jpeg bytes to be on cpu
+                if t.device.type != "cpu":
+                    t = t.cpu()
+                flat_encoded.append(t)
         
         flat_decoded = torchvision.io.decode_jpeg(
             flat_encoded, 
             mode=torchvision.io.ImageReadMode.UNCHANGED,
-            device = self.device,
+            device=decode_device,
         ) # list of (C, H, W) gpu tensors
 
         out = []
@@ -179,11 +217,11 @@ class LitModel(pl.LightningModule):
     def _shared_step(self, batch: torch.Tensor, stage: str) -> torch.Tensor:
         past, future, intent = batch['PAST'], batch['FUTURE'], batch['INTENT']
 
-        if "IMAGES_JPEG" in batch:
+        if "IMAGES" in batch:
+            images = batch["IMAGES"]
+        elif "IMAGES_JPEG" in batch:
             images_jpeg = batch["IMAGES_JPEG"]
             images = self.decode_batch_jpeg(images_jpeg)
-        elif "IMAGES" in batch:
-            images = batch["IMAGES"]
         else:
             raise KeyError("Batch must contain either 'IMAGES_JPEG' or 'IMAGES' key.")
         
@@ -202,17 +240,14 @@ class LitModel(pl.LightningModule):
         pred = pred_future
         t_steps = future.shape[1]
         t2 = t_steps * 2
-        k_modes = self.model.n_proposals if hasattr(self.model, "n_proposals") else 1
 
         if pred.ndim != 2:
-            raise ValueError(f"Unexpected pred shape {pred.shape}; expected (B, T*2) or (B, {k_modes}*T*2).")
+            raise ValueError(f"Unexpected pred shape {pred.shape}; expected 2D (B, K*T*2).")
 
-        if pred.shape[1] == t2:
-            pred = pred.view(pred.size(0), 1, t_steps, 2)
-        elif pred.shape[1] == k_modes * t2:
-            pred = pred.view(pred.size(0), k_modes, t_steps, 2)
-        else:
-            raise ValueError(f"Unexpected pred shape {pred.shape}; expected (B, T*2) or (B, {k_modes}*T*2).")
+        if pred.shape[1] % t2 != 0:
+            raise ValueError(f"pred dim1={pred.shape[1]} is not divisible by T*2={t2}.")
+        k_modes = pred.shape[1] // t2
+        pred = pred.view(pred.size(0), k_modes, t_steps, 2)
 
         if pred_scores is not None and pred.size(1) > 1:
             rfs_pred_idx = pred_scores.argmin(dim=1)
@@ -229,19 +264,21 @@ class LitModel(pl.LightningModule):
         rfs_weight = getattr(self.hparams, "rfs_weight", 0.0)
         loss_rfs = rfs_weight * rfs_unweighted
 
+        loss_type = getattr(self.hparams, "model_cfg_loss_type", "mse")
+
         # ADE per mode: (B, K)
         dist = torch.norm(pred - future[:, torch.newaxis, :, :], dim=-1)  # (B, K, T)
         ade_per_mode = dist.mean(dim=-1)
 
         # Top-M WTA for trajectory loss. Here, we have an "oracle" that picks the best mode
-        # so, our loss is calculated on the mean of the top 5 trajectories.
-        top_m = min(5, ade_per_mode.size(1))
+        # so, our loss is calculated on the mean of the top n trajectories.
+        top_m = min(getattr(self.hparams, "model_cfg_loss_top_n", 5), ade_per_mode.size(1))
         loss_ade = ade_per_mode.topk(top_m, largest=False, dim=1).values.mean()
 
         # oracle ade is best of all proposals, since we have the GT data during training
         oracle_ade = ade_per_mode.min(dim=1).values.mean()
         ade_pred = None
-        # pred_scores is now the predicted ADE of each trajectory
+        # pred_scores is now the predicted ADE of each trajectory / expectation loss
         if pred_scores is not None and k_modes > 1:
             pred_idx = pred_scores.argmin(dim=1)
             ade_pred = ade_per_mode[torch.arange(pred.size(0), device=pred.device), pred_idx].mean()
@@ -252,11 +289,46 @@ class LitModel(pl.LightningModule):
         # Scorer Losses -> encourage ranking of predicted scores to match true ranking of ades that are generated
         if k_modes > 1 and pred_scores is not None:
             ade = ade_per_mode.detach()  # (B, K)
-            loss_score = F.mse_loss(pred_scores, ade)
+            if loss_type == "mse":
+                loss_score = F.mse_loss(pred_scores, ade)
+            elif loss_type == "reinforce":
+                tau_base = getattr(self.hparams, "model_cfg_loss_tau_base", 1.0)
+                decay_factor = getattr(self.hparams, "model_cfg_loss_tau_decay", 0.95)
+                entropy_lambda = getattr(self.hparams, "model_cfg_loss_entropy_lambda", 0.01)
+                # p_k = softmax(s_k / tau)
+                logits = -pred_scores / max(0.1, tau_base * (decay_factor ** self.current_epoch))
+                p = F.softmax(logits, dim=1)
+                # Loss = sum_k {p_k * e_k} (e.g., expectation of e_k)
+                loss_selection = (p * ade).sum(dim=1).mean()
+                # H(p) = -sum(p) * log(p)
+                entropy = -(p * (p + 1e-8).log()).sum(dim=1).mean()
+                loss_score = loss_selection - entropy_lambda * entropy
+            else:
+                raise NotImplementedError(f"Loss {loss_type} is not implemented")
             pred_idx = pred_scores.argmin(dim=1)
             ade_pred = ade_per_mode[torch.arange(pred.size(0), device=pred.device), pred_idx].mean()
         else:
             loss_score = torch.tensor(0.0, device=self.device)
+
+        # Scorer Metrics
+        scorer_metrics = {}
+        if k_modes > 1 and pred_scores is not None:
+            # Rank of the scorer's top-1 pick among oracle-sorted proposals
+            oracle_ranking = ade_per_mode.argsort(dim=1)  # (B, K) indices sorted by true ADE
+            oracle_rank_of = oracle_ranking.argsort(dim=1)  # (B, K) rank of each proposal
+            scorer_pick = pred_scores.argmin(dim=1)         # (B,) scorer's best
+            pick_rank = oracle_rank_of[torch.arange(pred.size(0), device=pred.device), scorer_pick].float()  # (B,)
+            scorer_metrics[f"{stage}_scorer_mean_rank"] = pick_rank.mean()
+            for topk in (1, 5, 10):
+                if topk <= k_modes:
+                    scorer_metrics[f"{stage}_scorer_top{topk}_acc"] = (pick_rank < topk).float().mean()
+            # Spearman rank correlation
+            K = ade_per_mode.size(1)
+            oracle_ranks = oracle_rank_of.float()  # (B, K)
+            scorer_ranks = pred_scores.argsort(dim=1).argsort(dim=1).float()  # (B, K)
+            d = oracle_ranks - scorer_ranks
+            rho = 1 - 6 * (d ** 2).sum(dim=1) / (K * (K ** 2 - 1))
+            scorer_metrics[f"{stage}_scorer_spearman"] = rho.mean()
 
         # Depth Loss
         if pred_depth is not None:
@@ -283,7 +355,10 @@ class LitModel(pl.LightningModule):
             log_payload[f"{stage}_ade_pred"] = ade_pred
             log_payload[f"{stage}_ade_oracle"] = oracle_ade
             log_payload[f"{stage}_ade_regret"] = regret
-        self.log_dict(log_payload, prog_bar=True, logger=True)
+        log_payload.update(scorer_metrics)
+        self.log_dict(log_payload, prog_bar=True, logger=True,
+                      batch_size=past.size(0),
+                      sync_dist=(stage == "val"))
 
         return total_loss
     

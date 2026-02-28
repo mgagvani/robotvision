@@ -68,3 +68,72 @@ class TransformerBlock(nn.Module):
         # 3. feed forward to next block (MLP)
         query = query + self.mlp(self.ln3(query))
         return query
+    
+class MLP(nn.Module):
+    def __init__(self, in_features: int, hidden_features: int, out_features: int) -> None:
+        super().__init__()
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.fc2 = nn.Linear(hidden_features, out_features)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.gelu(self.fc1(x))
+        return self.fc2(x)
+
+
+class AttentionBlock(nn.Module):
+    def __init__(self, dim: int, num_heads: int, mlp_ratio: float = 4.0) -> None:
+        super().__init__()
+        self.self_attn_norm = nn.LayerNorm(dim)
+        self.self_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        self.cross_attn_norm_q = nn.LayerNorm(dim)
+        self.cross_attn_norm_kv = nn.LayerNorm(dim)
+        self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        hidden_features = int(dim * mlp_ratio)
+        self.mlp_norm = nn.LayerNorm(dim)
+        self.mlp = MLP(dim, hidden_features, dim)
+
+    def forward(self, x: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        # Self‑attention
+        residual = x
+        x_norm = self.self_attn_norm(x)
+        attn_output, _ = self.self_attn(x_norm, x_norm, x_norm)
+        x = residual + attn_output
+
+        # Cross‑attention
+        residual = x
+        q = self.cross_attn_norm_q(x)
+        k = self.cross_attn_norm_kv(context)
+        v = k
+        attn_output, _ = self.cross_attn(q, k, v)
+        x = residual + attn_output
+
+        # Feed‑forward
+        residual = x
+        x_norm = self.mlp_norm(x)
+        x = residual + self.mlp(x_norm)
+        return x
+
+
+class TransformerDecoder(nn.Module):
+    def __init__(self, num_layers: int, dim: int, num_heads: int) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList([AttentionBlock(dim, num_heads) for _ in range(num_layers)])
+
+    def forward(self, x: torch.Tensor, context: torch.Tensor) -> List[torch.Tensor]:
+        hidden_states: List[torch.Tensor] = []
+        for layer in self.layers:
+            x = layer(x, context)
+            hidden_states.append(x)
+        return hidden_states
+
+
+class TransformerDecoderScorer(nn.Module):
+    def __init__(self, num_layers: int, dim: int, num_heads: int) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList([AttentionBlock(dim, num_heads) for _ in range(num_layers)])
+
+    def forward(self, x: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        for layer in self.layers:
+            x = layer(x, context)
+        return x
+
