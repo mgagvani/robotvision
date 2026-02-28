@@ -53,6 +53,7 @@ if __name__ == "__main__":
     wandb_logger.watch(lit_model, log="all")
 
     strategy = "ddp_find_unused_parameters_true" if torch.cuda.device_count() > 1 else "auto"
+    torch.set_float32_matmul_precision("medium")
     trainer = pl.Trainer(
         max_epochs=args.max_epochs,
         logger=[CSVLogger(base_path + "/logs", name=timestamp), wandb_logger],

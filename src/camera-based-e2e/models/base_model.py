@@ -264,6 +264,8 @@ class LitModel(pl.LightningModule):
         rfs_weight = getattr(self.hparams, "rfs_weight", 0.0)
         loss_rfs = rfs_weight * rfs_unweighted
 
+        loss_type = getattr(self.hparams, "model_cfg_loss_type", "mse")
+
         # ADE per mode: (B, K)
         dist = torch.norm(pred - future[:, torch.newaxis, :, :], dim=-1)  # (B, K, T)
         ade_per_mode = dist.mean(dim=-1)
@@ -276,7 +278,7 @@ class LitModel(pl.LightningModule):
         # oracle ade is best of all proposals, since we have the GT data during training
         oracle_ade = ade_per_mode.min(dim=1).values.mean()
         ade_pred = None
-        # pred_scores is now the predicted ADE of each trajectory
+        # pred_scores is now the predicted ADE of each trajectory / expectation loss
         if pred_scores is not None and k_modes > 1:
             pred_idx = pred_scores.argmin(dim=1)
             ade_pred = ade_per_mode[torch.arange(pred.size(0), device=pred.device), pred_idx].mean()
@@ -287,11 +289,46 @@ class LitModel(pl.LightningModule):
         # Scorer Losses -> encourage ranking of predicted scores to match true ranking of ades that are generated
         if k_modes > 1 and pred_scores is not None:
             ade = ade_per_mode.detach()  # (B, K)
-            loss_score = F.mse_loss(pred_scores, ade)
+            if loss_type == "mse":
+                loss_score = F.mse_loss(pred_scores, ade)
+            elif loss_type == "reinforce":
+                tau_base = getattr(self.hparams, "model_cfg_loss_tau_base", 1.0)
+                decay_factor = getattr(self.hparams, "model_cfg_loss_tau_decay", 0.95)
+                entropy_lambda = getattr(self.hparams, "model_cfg_loss_entropy_lambda", 0.01)
+                # p_k = softmax(s_k / tau)
+                logits = -pred_scores / max(0.1, tau_base * (decay_factor ** self.current_epoch))
+                p = F.softmax(logits, dim=1)
+                # Loss = sum_k {p_k * e_k} (e.g., expectation of e_k)
+                loss_selection = (p * ade).sum(dim=1).mean()
+                # H(p) = -sum(p) * log(p)
+                entropy = -(p * (p + 1e-8).log()).sum(dim=1).mean()
+                loss_score = loss_selection - entropy_lambda * entropy
+            else:
+                raise NotImplementedError(f"Loss {loss_type} is not implemented")
             pred_idx = pred_scores.argmin(dim=1)
             ade_pred = ade_per_mode[torch.arange(pred.size(0), device=pred.device), pred_idx].mean()
         else:
             loss_score = torch.tensor(0.0, device=self.device)
+
+        # Scorer Metrics
+        scorer_metrics = {}
+        if k_modes > 1 and pred_scores is not None:
+            # Rank of the scorer's top-1 pick among oracle-sorted proposals
+            oracle_ranking = ade_per_mode.argsort(dim=1)  # (B, K) indices sorted by true ADE
+            oracle_rank_of = oracle_ranking.argsort(dim=1)  # (B, K) rank of each proposal
+            scorer_pick = pred_scores.argmin(dim=1)         # (B,) scorer's best
+            pick_rank = oracle_rank_of[torch.arange(pred.size(0), device=pred.device), scorer_pick].float()  # (B,)
+            scorer_metrics[f"{stage}_scorer_mean_rank"] = pick_rank.mean()
+            for topk in (1, 5, 10):
+                if topk <= k_modes:
+                    scorer_metrics[f"{stage}_scorer_top{topk}_acc"] = (pick_rank < topk).float().mean()
+            # Spearman rank correlation
+            K = ade_per_mode.size(1)
+            oracle_ranks = oracle_rank_of.float()  # (B, K)
+            scorer_ranks = pred_scores.argsort(dim=1).argsort(dim=1).float()  # (B, K)
+            d = oracle_ranks - scorer_ranks
+            rho = 1 - 6 * (d ** 2).sum(dim=1) / (K * (K ** 2 - 1))
+            scorer_metrics[f"{stage}_scorer_spearman"] = rho.mean()
 
         # Depth Loss
         if pred_depth is not None:
@@ -318,6 +355,7 @@ class LitModel(pl.LightningModule):
             log_payload[f"{stage}_ade_pred"] = ade_pred
             log_payload[f"{stage}_ade_oracle"] = oracle_ade
             log_payload[f"{stage}_ade_regret"] = regret
+        log_payload.update(scorer_metrics)
         self.log_dict(log_payload, prog_bar=True, logger=True,
                       batch_size=past.size(0),
                       sync_dist=(stage == "val"))

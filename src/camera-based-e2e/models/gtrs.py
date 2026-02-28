@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Literal
 
 import torch
 import torch.nn as nn
@@ -13,13 +13,20 @@ import numpy as np
 @dataclass
 class GTRSConfig:
     d_model: int = 256
-    vocab_dropout: float = 512 / 1024 # 1024 in vocab.npy right now
+    vocab_dropout: float = 0.5
     d_ffn: int = 2048
     n_head: int = 8
     n_layers: int = 4
     n_past: int = 16  # 4s @ 4Hz
+    vocab_size: int = 16384
 
     loss_top_n: int = 64 # in DrivoR/DeepMonocular, N=50, n=5. Here N=1024, n=64
+    # 'mse': attempt to regress the error of the trajectory
+    # 'reinforce': minimize the expectation of error (vs. reinforce maximize exp of reward from samples), by calculating probs of errors thru softmax. includes regularization (entropy) 
+    loss_type: Literal['mse', 'reinforce'] = 'reinforce'
+    loss_tau_base: float = 4.0 # tau = 4.0 * (0.9 ** epoch)
+    loss_tau_decay: float = 0.9
+    loss_entropy_lambda: float = 0.01
 
 class GTRSModel(nn.Module):
     def __init__(self, feature_extractor: nn.Module, *, out_dim: Optional[int]):
@@ -32,7 +39,7 @@ class GTRSModel(nn.Module):
 
         # load vocab
         self.vocab = nn.Parameter(
-            torch.from_numpy(np.load(Path(__file__).parent.parent / "vocab.npy"))
+            torch.from_numpy(np.load(Path(__file__).parent.parent / f"vocab_{self.cfg.vocab_size}.npy"))
             , requires_grad=False
         )
         # vocab shape: (N_vocab, T, 2), flatten each entry to T*2 for the MLP
@@ -43,7 +50,7 @@ class GTRSModel(nn.Module):
         self.down_conv = nn.Conv1d(self.d_features, self.cfg.d_model, 1, 1)
 
         # positional encoding for visual tokens
-
+        self.positional_encoding = nn.Parameter(nn.init.trunc_normal_(torch.zeros((1, self.n_img_tokens, self.d_features)), std=0.02)) # (1, N, C)
 
         # vocabulary embedding: (N_vocab, vocab_dim) -> (N_vocab, d_model)
         self.vocab_embed = nn.Sequential(
@@ -62,8 +69,7 @@ class GTRSModel(nn.Module):
 
         # ego status encoding
         self.status_encoding = nn.Sequential(
-            nn.Flatten(),  # (B, n_past, 6) -> (B, n_past*6)
-            nn.Linear(self.cfg.n_past * 6, self.cfg.d_ffn),
+            nn.Linear(self.cfg.n_past * 6 + 3, self.cfg.d_ffn),
             nn.GELU(),
             nn.Linear(self.cfg.d_ffn, self.cfg.d_model),
         )
@@ -75,6 +81,8 @@ class GTRSModel(nn.Module):
         self.heads = nn.ModuleDict({
             "scores": nn.Sequential(
                 nn.Linear(self.cfg.d_model, self.cfg.d_ffn),
+                nn.GELU(),
+                nn.Linear(self.cfg.d_ffn, self.cfg.d_ffn), 
                 nn.GELU(),
                 nn.Linear(self.cfg.d_ffn, 1),
             )
@@ -104,7 +112,7 @@ class GTRSModel(nn.Module):
         out = {}
 
         # ViT features
-        visual_tokens = self.extract_tokens(images[1][:, None, ...])
+        visual_tokens = self.extract_tokens(images[1][:, None, ...]) + self.positional_encoding
 
         # d_features --> d_model
         visual_tokens = visual_tokens.flatten(start_dim=1, end_dim=2) # (b, n_cameras * n_tokens, d_features)
@@ -129,7 +137,7 @@ class GTRSModel(nn.Module):
         tr_out = self.transformer(embedded_vocab.unsqueeze(0).expand(B, -1, -1), tokens) 
 
         # GTRS simply adds this to transformer output
-        dist_status = tr_out + self.status_encoding(past).unsqueeze(1)
+        dist_status = tr_out + self.status_encoding(torch.cat([past.reshape(B, -1), F.one_hot((intent - 1).long(), num_classes=3).float()], dim=1)).unsqueeze(1)
 
         for k, head in self.heads.items():
             out[k] = head(dist_status).squeeze(-1)  # (B, N_vocab)
