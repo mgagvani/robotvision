@@ -3,6 +3,7 @@ from typing import Optional, Literal
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .blocks import CrossAttention
 
 from dataclasses import dataclass
 
@@ -14,6 +15,7 @@ import numpy as np
 class GTRSConfig:
     d_model: int = 256
     vocab_dropout: float = 0.5
+    train_dropout: float = 0.5
     d_ffn: int = 2048
     n_head: int = 8
     n_layers: int = 4
@@ -46,8 +48,11 @@ class GTRSModel(nn.Module):
         self.vocab_dim = self.vocab[0].numel()  # e.g. 80 timesteps * 2 = 160
         self.n_proposals = self.vocab.shape[0]
 
+        # TODO: find a better way of determining V_L from V_XL, instead of taking vocab_dropout fraction e.g. 16384 * 0.5 = 8192. 
+        self.vocab_inference = self.vocab[:int(self.cfg.vocab_dropout * self.vocab.shape[0])] if self.cfg.vocab_dropout > 0 else self.vocab
+
         # out dim check
-        if out_dim is not None and out_dim // 2 == self.vocab.shape[1]:
+        if out_dim is not None and out_dim // 2 != self.vocab.shape[1]:
             raise ValueError(f"out_dim should be None or {self.vocab.shape[1] * 2}, but got {out_dim}")
 
 
@@ -64,13 +69,11 @@ class GTRSModel(nn.Module):
             nn.Linear(self.cfg.d_ffn, self.cfg.d_model),
         )
 
-        # big transformer to transform...
-        self.transformer = nn.TransformerDecoder(
-            nn.TransformerDecoderLayer(
-                self.cfg.d_model, self.cfg.n_head, self.cfg.d_ffn,
-                dropout=0.0, batch_first=True
-            ), self.cfg.n_layers
-        )
+        # simpler cross attention
+        self.blocks = nn.ModuleList([
+            CrossAttention(self.cfg.d_model, self.cfg.n_head, self.cfg.d_ffn)
+            for _ in range(self.cfg.n_layers)
+        ])
 
         # ego status encoding
         self.status_encoding = nn.Sequential(
@@ -123,14 +126,16 @@ class GTRSModel(nn.Module):
         visual_tokens = visual_tokens.flatten(start_dim=1, end_dim=2) # (b, n_cameras * n_tokens, d_features)
         tokens: torch.Tensor = self.down_conv(visual_tokens.transpose(1,2)).transpose(1,2) # (b, n_c * n_t, d_model)
 
-        # If training, dropout vocab_dropout trajectories from trajectory vocabulary. 
-        # GTRS shows this improves generalization
-        if self.training and self.cfg.vocab_dropout:
+        # If training, use all vocab entries
+        # If inference, use vocab_dropout to select a subset
+        if self.training and self.cfg.train_dropout > 0:
             num_select = int(self.cfg.vocab_dropout * self.vocab.shape[0])  # e.g. 0.5 * 1024 = 512
             indices = torch.randperm(self.vocab.shape[0], device=self.vocab.device)[:num_select]
             vocab = self.vocab[indices]
-        else:
+        elif self.training and self.cfg.vocab_dropout == 0:
             vocab = self.vocab
+        elif not self.training: # val or inference, use V_L, not V_XL
+            vocab = self.vocab_inference # vocab_dropout fraction
         out['trajectory'] = vocab.unsqueeze(0).expand(B, -1, -1, -1).reshape(B, -1)
 
         # flatten (N_vocab, T, 2) -> (N_vocab, T*2) then embed to (N_vocab, d_model)
@@ -139,7 +144,11 @@ class GTRSModel(nn.Module):
 
         # (B, N_vocab, d_model) -> (B, N_vocab, d_model)
         # (target sequence, memory sequence) as input
-        tr_out = self.transformer(embedded_vocab.unsqueeze(0).expand(B, -1, -1), tokens) 
+        q = embedded_vocab.unsqueeze(0).expand(B, -1, -1)    
+        for blk in self.blocks:
+            q = blk(q, tokens)
+
+        tr_out = q
 
         # GTRS simply adds this to transformer output
         dist_status = tr_out + self.status_encoding(torch.cat([past.reshape(B, -1), F.one_hot((intent - 1).long(), num_classes=3).float()], dim=1)).unsqueeze(1)

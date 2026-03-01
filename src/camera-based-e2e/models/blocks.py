@@ -137,3 +137,26 @@ class TransformerDecoderScorer(nn.Module):
             x = layer(x, context)
         return x
 
+class CrossAttention(nn.Module):
+    '''
+    Unlike the nn.TransformerDecoderLayer, there is no self attention (Q' = Attention(Q, Q, Q)) here so
+    we do not incur the quadratic complexity of each of the proposals attending to each other.
+    '''
+    def __init__(self, d_model: int, n_head: int, d_ffn: int):
+        super().__init__()
+        self.ln_q = nn.LayerNorm(d_model)
+        self.cross = nn.MultiheadAttention(d_model, n_head, batch_first=True, dropout=0.0)
+        self.ln_ff = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_ffn),
+            nn.GELU(),
+            nn.Linear(d_ffn, d_model),
+        )
+
+    def forward(self, q: torch.Tensor, mem: torch.Tensor) -> torch.Tensor:
+        # q: (B, K, d), mem: (B, S, d)
+        q_norm = self.ln_q(q)
+        attn_out, _ = self.cross(q_norm, mem, mem, need_weights=False)
+        q = q + attn_out
+        q = q + self.ffn(self.ln_ff(q))
+        return q

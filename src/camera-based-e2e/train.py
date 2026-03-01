@@ -29,7 +29,9 @@ if __name__ == "__main__":
     parser.add_argument('--profile', action='store_true', help='Whether to run the profiler')
     args = parser.parse_args()
 
-    # Data 
+    pl.seed_everything(42, workers=True)
+
+    # Data
     train_dataset = WaymoE2E(indexFile='index_train.pkl', data_dir=args.data_dir, n_items=250_000)
     test_dataset = WaymoE2E(indexFile='index_val.pkl', data_dir=args.data_dir, n_items=25_000)
 
@@ -52,7 +54,7 @@ if __name__ == "__main__":
     wandb_logger = WandbLogger(name=timestamp, save_dir=base_path + "/logs", project="robotvision", log_model=True)
     wandb_logger.watch(lit_model, log="all")
 
-    strategy = "ddp_find_unused_parameters_true" if torch.cuda.device_count() > 1 else "auto"
+    strategy = "ddp" if torch.cuda.device_count() > 1 else "auto"
     torch.set_float32_matmul_precision("medium")
     trainer = pl.Trainer(
         max_epochs=args.max_epochs,
