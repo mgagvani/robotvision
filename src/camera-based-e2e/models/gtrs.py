@@ -15,7 +15,6 @@ import numpy as np
 class GTRSConfig:
     d_model: int = 256
     vocab_dropout: float = 0.5
-    train_dropout: float = 0.5
     d_ffn: int = 2048
     n_head: int = 8
     n_layers: int = 4
@@ -47,9 +46,6 @@ class GTRSModel(nn.Module):
         # vocab shape: (N_vocab, T, 2), flatten each entry to T*2 for the MLP
         self.vocab_dim = self.vocab[0].numel()  # e.g. 80 timesteps * 2 = 160
         self.n_proposals = self.vocab.shape[0]
-
-        # TODO: find a better way of determining V_L from V_XL, instead of taking vocab_dropout fraction e.g. 16384 * 0.5 = 8192. 
-        self.vocab_inference = self.vocab[:int(self.cfg.vocab_dropout * self.vocab.shape[0])] if self.cfg.vocab_dropout > 0 else self.vocab
 
         # out dim check
         if out_dim is not None and out_dim // 2 != self.vocab.shape[1]:
@@ -126,16 +122,12 @@ class GTRSModel(nn.Module):
         visual_tokens = visual_tokens.flatten(start_dim=1, end_dim=2) # (b, n_cameras * n_tokens, d_features)
         tokens: torch.Tensor = self.down_conv(visual_tokens.transpose(1,2)).transpose(1,2) # (b, n_c * n_t, d_model)
 
-        # If training, use all vocab entries
-        # If inference, use vocab_dropout to select a subset
-        if self.training and self.cfg.train_dropout > 0:
+        if self.training and self.cfg.vocab_dropout:
             num_select = int(self.cfg.vocab_dropout * self.vocab.shape[0])  # e.g. 0.5 * 1024 = 512
             indices = torch.randperm(self.vocab.shape[0], device=self.vocab.device)[:num_select]
             vocab = self.vocab[indices]
-        elif self.training and self.cfg.vocab_dropout == 0:
+        else:
             vocab = self.vocab
-        elif not self.training: # val or inference, use V_L, not V_XL
-            vocab = self.vocab_inference # vocab_dropout fraction
         out['trajectory'] = vocab.unsqueeze(0).expand(B, -1, -1, -1).reshape(B, -1)
 
         # flatten (N_vocab, T, 2) -> (N_vocab, T*2) then embed to (N_vocab, d_model)
