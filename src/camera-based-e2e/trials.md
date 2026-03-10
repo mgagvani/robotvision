@@ -157,22 +157,53 @@ Better contextualization of future path in encoder, Maybe with the intent (that 
         10337090 - random nulling of 0-100% past data (percent set for entire batch) - 1.59 - Failed removed
 
 Continue w/ 3 as base
-10338717 - 2 - 3 cameras
- -  - No query-per-waypoint, all one query
- -  - no query-per-waypoint, all x,y/theta,v each in their own query (so similar speeds accross the entire time step)
+10338717 - 2 - 3 cameras - 1.47
 
+10338871 - 1 - no query-per-waypoint, all x/y/theta/v each in a query - 1.47
+10338874 - 3 - No query-per-waypoint, all one query - 1.47
 
+10341393 - 2 - all 8 cameras - 1.50
+
+REWORK:
+    10341714 - 25% chance of all past data dropout for visual training. - 1.50 (a bit unstable)
+    10341821 - visual neck - 1.57
+    10352986 - depth loss - 1.63 (somewhat unstable)
+        10353245 - increased depth decoder size + increased depth loss input - 1.62 (stable)
+        10353435 - better visneck - 1.59
 
 
 
     Things to try
-More Cameras
+
+10364098 - 3 - visual neck with 3 images - 1.50
+10364101 - 2 - visual neck with 3 images visual tokens only at first - 1.48
+
+
+10371984 - Depth loss - 1.56
+10375892 - Added a self-attention layer
+10382397 - Object + lane loss - 1.57
+
+
+rework_reg before no special attention
+rework_reg_copy object + lane 
+re
+
+
+Object Detection Loss
+Lane Detection loss
+
+test split cross attention
+
+VoVnet w/ PRIX
+https://arxiv.org/pdf/2507.17596
+https://arxiv.org/pdf/1904.09730
+
+
+downscale cameras to increase token information density.
 multi-trajectory loss (to prevent trajectory averaging between valid trajectories)
-Break Cross attention into 2 stages, 2 with past tokens, 4 with visual tokens, or 3/3
-Data selection
+Break Cross attention into 2 stages, 4 with visual, 2 with past, 1 with self - meh, nothing special
+Data selection - sampling good data?
 Data augmentation
-Large Past Dropout (heavy dropout for camera-learning-forcing) OR randomly zero out past input into model x% of the time
-object detection loss, depth loss, etc
 Gated Cross-Attention for visual CA
 
 10330130 - reworked scorer

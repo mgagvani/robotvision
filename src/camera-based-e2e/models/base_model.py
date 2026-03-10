@@ -179,3 +179,152 @@ def collate_with_images(batch):
         "NAME": names,
     }
 
+
+def collate_with_images_tokens_depth(batch):
+    past = [torch.as_tensor(b["PAST"], dtype=torch.float32) for b in batch]
+    future = [torch.as_tensor(b["FUTURE"], dtype=torch.float32) for b in batch]
+    intent = torch.as_tensor([b["INTENT"] for b in batch])
+    names = [b["NAME"] for b in batch]
+
+    cams = list(zip(*[b["IMAGES"] for b in batch])) if batch[0]["IMAGES"] else []
+    images = [torch.stack(cam_imgs, dim=0) for cam_imgs in cams]
+
+    out = {
+        "PAST": torch.stack(past, dim=0),
+        "FUTURE": torch.stack(future, dim=0),
+        "INTENT": intent,
+        "IMAGES": images,
+        "NAME": names,
+    }
+    
+    if "TOKENS" in batch[0] and batch[0].get("TOKENS"):
+        tokens_batch = [b["TOKENS"] for b in batch] 
+        
+        stacked_tokens = []
+        for cam_idx in range(3):
+            cam_tensors = []
+            for tokens_list in tokens_batch:
+                if tokens_list and cam_idx < len(tokens_list):
+                    cam_tensors.append(tokens_list[cam_idx])
+                else:
+                    cam_tensors.append(torch.zeros(1024, 420))
+                    print("FAILED TO LOAD TOKENS FOR CAMERA")
+            stacked_tokens.append(torch.stack(cam_tensors, dim=0))
+        out["TOKENS"] = stacked_tokens
+
+    # Handle precomputed depth: [tensor_cam0, tensor_cam1, tensor_cam2]
+    if "PRECOMPUTED_DEPTH" in batch[0]:
+        depth_batch = [b["PRECOMPUTED_DEPTH"] for b in batch]  # List of lists
+        
+        # Stack along camera dimension: (batch, 3, H, W)
+        stacked = []
+        for cam_idx in range(3):
+            cam_tensors = []
+            for depth_list in depth_batch:
+                if depth_list and cam_idx < len(depth_list):
+                    cam_tensors.append(depth_list[cam_idx])
+                else:
+                    cam_tensors.append(torch.zeros(128, 128))
+                    print("FAILED TO LOAD DEPTH FOR CAMERA")
+            stacked.append(torch.stack(cam_tensors, dim=0))
+        out["PRECOMPUTED_DEPTH"] = torch.stack(stacked, dim=1)
+    
+    # Add object detection ground truth if available
+    # Stack along camera dimension: (batch, 3, max_detections, 4) for each detection component
+    if "PRECOMPUTED_OBJ_DET" in batch[0] and batch[0]["PRECOMPUTED_OBJ_DET"] is not None:
+        obj_det_batch = [b["PRECOMPUTED_OBJ_DET"] for b in batch]
+        
+        # Find max detections across all samples and cameras
+        max_det = 0
+        for obj_det_list in obj_det_batch:
+            if obj_det_list:
+                for det in obj_det_list:
+                    if det is not None and 'boxes' in det:
+                        # Squeeze batch dim if present (shape is 1, num_det, 4)
+                        boxes = det['boxes']
+                        if boxes.ndim == 3 and boxes.shape[0] == 1:
+                            boxes = boxes.squeeze(0)
+                        n = boxes.shape[0] if boxes.numel() > 0 else 0
+                        max_det = max(max_det, n)
+        
+        # Default to at least 1 detection slot
+        max_det = max(max_det, 1)
+        
+        # Pad and stack boxes: (batch, 3, max_detections, 4)
+        stacked_boxes = []
+        stacked_labels = []
+        stacked_scores = []
+        
+        for cam_idx in range(3):
+            cam_boxes = []
+            cam_labels = []
+            cam_scores = []
+            for obj_det_list in obj_det_batch:
+                if obj_det_list and cam_idx < len(obj_det_list):
+                    det = obj_det_list[cam_idx]
+                    if det is not None:
+                        boxes = det['boxes'] if 'boxes' in det else torch.zeros(0, 4)
+                        labels = det['labels'] if 'labels' in det else torch.zeros(0, dtype=torch.long)
+                        scores = det['scores'] if 'scores' in det else torch.zeros(0)
+                        
+                        # Squeeze batch dim if present (shape is 1, num_det, 4)
+                        if boxes.ndim == 3 and boxes.shape[0] == 1:
+                            boxes = boxes.squeeze(0)
+                        if labels.ndim == 2 and labels.shape[0] == 1:
+                            labels = labels.squeeze(0)
+                        if scores.ndim == 2 and scores.shape[0] == 1:
+                            scores = scores.squeeze(0)
+                        
+                        n = boxes.shape[0] if boxes.numel() > 0 else 0
+                        if n < max_det:
+                            # Pad to max_det
+                            boxes_padded = torch.zeros(max_det, 4)
+                            labels_padded = torch.full((max_det,), -1, dtype=torch.long)
+                            scores_padded = torch.zeros(max_det)
+                            if n > 0:
+                                boxes_padded[:n] = boxes
+                                labels_padded[:n] = labels
+                                scores_padded[:n] = scores
+                            cam_boxes.append(boxes_padded)
+                            cam_labels.append(labels_padded)
+                            cam_scores.append(scores_padded)
+                        else:
+                            cam_boxes.append(boxes[:max_det])
+                            cam_labels.append(labels[:max_det])
+                            cam_scores.append(scores[:max_det])
+                    else:
+                        cam_boxes.append(torch.zeros(max_det, 4))
+                        cam_labels.append(torch.full((max_det,), -1, dtype=torch.long))
+                        cam_scores.append(torch.zeros(max_det))
+                else:
+                    cam_boxes.append(torch.zeros(max_det, 4))
+                    cam_labels.append(torch.full((max_det,), -1, dtype=torch.long))
+                    cam_scores.append(torch.zeros(max_det))
+            stacked_boxes.append(torch.stack(cam_boxes, dim=0))
+            stacked_labels.append(torch.stack(cam_labels, dim=0))
+            stacked_scores.append(torch.stack(cam_scores, dim=0))
+        
+        out["PRECOMPUTED_OBJ_DET"] = {
+            'boxes': torch.stack(stacked_boxes, dim=1),  # (batch, 3, max_det, 4)
+            'labels': torch.stack(stacked_labels, dim=1),  # (batch, 3, max_det)
+            'scores': torch.stack(stacked_scores, dim=1),  # (batch, 3, max_det)
+        }
+    
+    # Add lane detection ground truth if available
+    # Stack along camera dimension: (batch, 3, 2, H, W)
+    if "PRECOMPUTED_LANE" in batch[0] and batch[0]["PRECOMPUTED_LANE"] is not None:
+        lane_batch = [b["PRECOMPUTED_LANE"] for b in batch]
+        
+        stacked_lanes = []
+        for cam_idx in range(3):
+            cam_tensors = []
+            for lane_list in lane_batch:
+                if lane_list and cam_idx < len(lane_list):
+                    cam_tensors.append(lane_list[cam_idx])
+                else:
+                    cam_tensors.append(torch.zeros(2, 128, 128))
+            stacked_lanes.append(torch.stack(cam_tensors, dim=0))
+        
+        out["PRECOMPUTED_LANE"] = torch.stack(stacked_lanes, dim=1)  # (batch, 3, 2, 128, 128)
+
+    return out

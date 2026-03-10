@@ -2,7 +2,6 @@ import torch
 from torch.utils.data import IterableDataset
 from protos import e2e_pb2
 import torchvision
-from sklearn.cluster import MiniBatchKMeans
 import pickle
 import struct
 import os
@@ -24,15 +23,30 @@ class WaymoE2E(IterableDataset):
         data_dir='./dataset',
         images = True,
         n_items: Optional[int] = None,
+        
         seed: Optional[int] = None,
+        
+        # Precomputed shard loading options
+        use_precomputed: bool = False,
+        precomputed_dir: Optional[str] = None,
+        shard_size: int = 1000,
     ):
         self.images = images
         self.data_dir = data_dir
         self.seed = seed
-
+        
+        # Precomputed options
+        self.use_precomputed = use_precomputed
+        self.precomputed_dir = precomputed_dir
+        self.shard_size = shard_size
+        
+        # Track current shard to enable cleanup after moving to next shard
+        self._current_shard_idx = None
+        self._current_shard_data = None
+        
         self.filename = ""
         self.file = None
-
+        
         with open(indexFile, 'rb') as f:
             # NOTE: test does not have reference trajectories
             # We train on train and validate on val set
@@ -46,13 +60,67 @@ class WaymoE2E(IterableDataset):
             start = rng.randint(0, total - n_items)
             self.indexes = self.indexes[start : start + n_items]
 
+        # Build index mapping for precomputed data
+        if self.use_precomputed and self.precomputed_dir:
+            self._build_precomputed_index()
 
+    def __del__(self):
+        """Ensure file handles are closed on object destruction."""
+        if self.file:
+            self.file.close()
+            self.file = None
+
+    def _build_precomputed_index(self):
+        shard_files = sorted([f for f in os.listdir(self.precomputed_dir) if f.startswith('shard_') and f.endswith('.pt')])
+        
+        self._shard_files = shard_files
+        self._num_shards = len(shard_files)
+        
+        print(f"Precomputed: {len(self.indexes)} samples across {self._num_shards} shards (shard_size={self.shard_size})")
+
+    def _cleanup_previous_shard(self, new_shard_idx: int):
+        """Clear reference to previous shard to free memory when moving to next shard."""
+        if self._current_shard_idx is not None and self._current_shard_idx != new_shard_idx:
+            self._current_shard_data = None  # Allow GC to collect previous shard
+
+    def _load_shard(self, shard_idx: int, shard_path: str):
+        """Load a shard from disk. No caching needed since each shard is used only once."""
+        return torch.load(shard_path, map_location='cpu')
+
+    def _get_precomputed_data(self, idx: int):
+        shard_idx = idx // self.shard_size
+        local_idx = idx % self.shard_size
+        
+        if shard_idx >= self._num_shards:
+            return {'depth': None, 'obj_det': None, 'lane_det': None, 'tokens': None}
+        
+        # Clean up previous shard before loading new one
+        self._cleanup_previous_shard(shard_idx)
+        
+        # Load new shard if needed
+        if self._current_shard_idx != shard_idx:
+            shard_path = os.path.join(self.precomputed_dir, self._shard_files[shard_idx])
+            self._current_shard_data = self._load_shard(shard_idx, shard_path)
+            self._current_shard_idx = shard_idx
+        
+        # Direct indexing into the list
+        if local_idx >= len(self._current_shard_data):
+            return {'depth': None, 'obj_det': None, 'lane_det': None, 'tokens': None}
+        
+        sample = self._current_shard_data[local_idx]
+        
+        return {
+            'depth': sample['depth'],
+            'obj_det': sample['obj_det'],
+            'lane_det': sample['lane_det'],
+            'tokens': sample['tokens']
+        }
 
     def decode_img(self, img):
         if not self.images:
             return np.array([])
         
-        img_tensor = torch.from_numpy(np.frombuffer(img, dtype=np.uint8).copy())
+        img_tensor = torch.from_numpy(np.frombuffer(img, dtype=np.uint8).copy()) 
         gpu_tensors_list = torchvision.io.decode_jpeg(
             img_tensor, 
             mode=torchvision.io.ImageReadMode.UNCHANGED,
@@ -97,7 +165,18 @@ class WaymoE2E(IterableDataset):
             # For submission to waymo evaluation server
             name = frame.frame.context.name
 
-            yield {'PAST': past, 'FUTURE': future, 'IMAGES': [self.decode_img(images.image) for images in frame.frame.images], 'INTENT': frame.intent, 'NAME': name}
+            # Build base batch
+            batch = {'PAST': past, 'FUTURE': future, 'IMAGES': [self.decode_img(images.image) for images in frame.frame.images], 'INTENT': frame.intent, 'NAME': name}
+            
+            # Add precomputed perception data if enabled
+            if self.use_precomputed and self.precomputed_dir:
+                precomputed_data = self._get_precomputed_data(idx)
+                batch['TOKENS'] = precomputed_data['tokens']
+                batch['PRECOMPUTED_DEPTH'] = precomputed_data['depth']
+                batch['PRECOMPUTED_OBJ_DET'] = precomputed_data['obj_det']
+                batch['PRECOMPUTED_LANE'] = precomputed_data['lane_det']
+            
+            yield batch
 
 if __name__ == "__main__":
 
@@ -105,62 +184,22 @@ if __name__ == "__main__":
     import time
     from tqdm import tqdm
     # NOTE: Replace with your path
-    DATA_DIR = '/scratch/gilbreth/bnamikas/data/waymo_open_dataset_end_to_end_camera_v_1_0_0/'
-    BATCH_SIZE = 64
-    dataset = WaymoE2E(indexFile="index_train.pkl", data_dir = DATA_DIR, images=False)
+    DATA_DIR = '/scratch/gilbreth/mgagvani/wod/waymo_open_dataset_end_to_end_camera_v_1_0_0/'
+    BATCH_SIZE = 32
+    dataset = WaymoE2E(indexFile="index_train.pkl", data_dir = DATA_DIR, images=True)
     loader = DataLoader(
         dataset, 
         batch_size=BATCH_SIZE,
-        num_workers=4,
+        num_workers=16,
     )
-
+    
     def main():
-        all_pasts = []
-        all_futures = []
-        
-        min_p, max_p = None, None
-        min_f, max_f = None, None
-
-        print(f"Processing {len(loader.dataset)} samples...")
-
-        for batch in tqdm(loader):
-            past = batch["PAST"]    # [B, 10, 6] or similar
-            future = batch["FUTURE"] # [B, 20, 2]
-
-            b_min_p, b_max_p = torch.amin(past, dim=0), torch.amax(past, dim=0)
-            b_min_f, b_max_f = torch.amin(future, dim=0), torch.amax(future, dim=0)
-
-            if min_p is None:
-                min_p, max_p = b_min_p, b_max_p
-                min_f, max_f = b_min_f, b_max_f
-            else:
-                min_p, max_p = torch.min(min_p, b_min_p), torch.max(max_p, b_max_p)
-                min_f, max_f = torch.min(min_f, b_min_f), torch.max(max_f, b_max_f)
-
-            all_pasts.append(past.cpu().numpy().astype(np.float32))
-            all_futures.append(future.cpu().numpy().astype(np.float32))
-
-        print("Concatenating and saving full datasets...")
-        full_pasts = np.concatenate(all_pasts, axis=0)
-        full_futures = np.concatenate(all_futures, axis=0)
-
-        np.save('all_past_states.npy', full_pasts)
-        np.save('all_future_states.npy', full_futures)
-        
-        torch.save({'min': min_p, 'max': max_p}, 'past_min_max.pt')
-        torch.save({'min': min_f, 'max': max_f}, 'future_min_max.pt')
-
-        print("Starting MiniBatchKMeans...")
-        n_samples = full_futures.shape[0]
-        flattened_futures = full_futures.reshape(n_samples, -1)
-
-        n_clusters = 20
-        kmeans = MiniBatchKMeans(n_clusters=n_clusters, batch_size=1024, n_init='auto', random_state=42)
-        kmeans.fit(flattened_futures)
-
-        centroids = kmeans.cluster_centers_.reshape(n_clusters, 20, 2)
-        torch.save(torch.from_numpy(centroids).float(), 'future_clusters.pt')
-        
-        print("Done! Files saved: all_past_states.npy, all_future_states.npy, past_min_max.pt, future_clusters.pt")
+        # start = time.time()
+        for batch_of_frames in tqdm(loader):
+            # print(batch_of_frames["INTENT"])
+            # print(batch_of_frames.keys(), [b.shape for b in batch_of_frames.values() if isinstance(b, torch.Tensor)])
+            pass
+        # print("Total Time:", time.time()-start)
+    
     import cProfile
     main()

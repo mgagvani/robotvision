@@ -1,5 +1,6 @@
 # Project-specific
 **/visualizations/**
+viz_perception
 **/tmp/**
 **/*logs/**
 **/wandb/**

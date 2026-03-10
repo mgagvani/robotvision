@@ -264,7 +264,9 @@ class DiffusionLTFMonocularModel(nn.Module):
             tokens = torch.cat([f.flatten(2) for f in feats], dim=1)
         else:
             tokens = feats.flatten(2)
+
         tokens = self.scale_features(torch.permute(tokens, (0, 2, 1)))
+         # (B, n_tokens, n_dims)
         
         ## Get intent embedding and past projection
         intent_token = self.intent_embed(intent - 1).unsqueeze(1)
@@ -282,6 +284,7 @@ class DiffusionLTFMonocularModel(nn.Module):
                 queries = block(queries, context)
 
             waypoints = self.predict_waypoints(queries.squeeze(1))
+            waypoints = waypoints.view(-1, 20, 2)
             
             return self.unwrap_preds(past, waypoints.unsqueeze(1), 1).view(-1, 20, 2)
         
@@ -306,6 +309,8 @@ class DiffusionLTFMonocularModel(nn.Module):
 
                 
                 controls = self.predict_waypoints(queries)
+                controls = controls.view(context.size(0), 20, 2)
+
                 pred_original_sample = self.unwrap_preds(
                     past_unwrap, controls.unsqueeze(1), 1
                 ).view(context.size(0), 20, 2)
@@ -319,9 +324,12 @@ class DiffusionLTFMonocularModel(nn.Module):
             return x_t
     
     def encode_future(self, future, future_context, t):
+        future = future.view(future.size(0), 20, 2)
+        # print(future.shape, future_context.shape)
+        # print(self.future_project(torch.cat([future, future_context], dim=-1)).shape, self.future_embeddings.to(future.device).shape, self.time_embed(t).unsqueeze(1).shape)
         future = self.future_project(torch.cat([future, future_context], dim=-1)) + self.future_embeddings.to(future.device) + self.time_embed(t).unsqueeze(1)
         future = self.encoder_mlp_1(future)
-        
+
         future_atten = future
         for block in self.encoder_selfattention:
             future_atten = block(future_atten, future_atten)
@@ -342,8 +350,8 @@ if __name__ == "__main__":
     train_dataset = WaymoE2E(indexFile='index_train.pkl', data_dir=args.data_dir, images=True, n_items=250_000)
     test_dataset = WaymoE2E(indexFile='index_val.pkl', data_dir=args.data_dir, images=True, n_items=5_000)
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=8, collate_fn=collate_with_images, persistent_workers=True, pin_memory=True)
-    val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=8, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=1, collate_fn=collate_with_images, persistent_workers=True, pin_memory=True)
+    val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=1, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
 
     scheduler = DDIMScheduler(
         num_train_timesteps=1000,

@@ -220,6 +220,12 @@ class DiffusionLTFMonocularModel(nn.Module):
             for _ in range(6)
         ])
 
+        self.visual_adapter = nn.Sequential(
+            nn.Conv2d(self.feature_dim, self.n_dims * 2, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(self.n_dims * 2, self.n_dims, 3, padding=1),
+        )
+
         # Predict output waypoints
         self.predict_waypoints = nn.Sequential(
             nn.Linear(self.n_dims, self.n_dims),
@@ -256,21 +262,28 @@ class DiffusionLTFMonocularModel(nn.Module):
         past, images, intent, future = x['PAST'], x['IMAGES'], x['INTENT'], x['FUTURE']
         
         ### Get the visual tokens
-        cams = images[:3] # front-left, front, front-right
-        visual_tokens = []
-
+        camera_tokens = []
+        cams = images[0:3] # front-left, front, front-right
         for cam in cams:
             with torch.no_grad():
                 feats = self.features(cam)
 
             if isinstance(feats, (list, tuple)):
-                visual_tokens.append(torch.cat([f.flatten(2) for f in feats], dim=1))
+                tokens = torch.cat([f.flatten(2) for f in feats], dim=1)
             else:
-                visual_tokens.append(feats.flatten(2))
+                tokens = feats.flatten(2)
 
-        tokens = torch.cat(visual_tokens, dim=-1)
-
-        tokens = self.scale_features(torch.permute(tokens, (0, 2, 1)))
+            # tokens = self.scale_features(torch.permute(tokens, (0, 2, 1)))
+            # [16, 192, 1024]
+            # tokens = tokens.permute(0, 2, 1) # [16, 192, 1024]
+            tokens = tokens.view(tokens.size(0), tokens.size(1), 32, 32) # [16, 192, 32, 32]
+            tokens = self.visual_adapter(tokens)
+            tokens = tokens.view(tokens.size(0), tokens.size(1), -1)
+            tokens = tokens.permute(0, 2, 1)
+            camera_tokens.append(tokens)
+        
+        tokens = torch.cat(camera_tokens, dim=1)
+         # (B, n_tokens, n_dims)
         
         ## Get intent embedding and past projection
         intent_token = self.intent_embed(intent - 1).unsqueeze(1)
@@ -284,10 +297,14 @@ class DiffusionLTFMonocularModel(nn.Module):
         if stage == "train":
             queries = self.encode_future(future, future_context, t)
             
-            for block in self.decoder_blocks:
+            for block in self.decoder_blocks[:4]:
+                queries = block(queries, context)
+            
+            for block in self.decoder_blocks[4:]:
                 queries = block(queries, context)
 
             waypoints = self.predict_waypoints(queries.squeeze(1))
+            waypoints = waypoints.view(-1, 20, 2)
             
             return self.unwrap_preds(past, waypoints.unsqueeze(1), 1).view(-1, 20, 2)
         
@@ -312,6 +329,8 @@ class DiffusionLTFMonocularModel(nn.Module):
 
                 
                 controls = self.predict_waypoints(queries)
+                controls = controls.view(context.size(0), 20, 2)
+
                 pred_original_sample = self.unwrap_preds(
                     past_unwrap, controls.unsqueeze(1), 1
                 ).view(context.size(0), 20, 2)
@@ -325,9 +344,12 @@ class DiffusionLTFMonocularModel(nn.Module):
             return x_t
     
     def encode_future(self, future, future_context, t):
+        future = future.view(future.size(0), 20, 2)
+        # print(future.shape, future_context.shape)
+        # print(self.future_project(torch.cat([future, future_context], dim=-1)).shape, self.future_embeddings.to(future.device).shape, self.time_embed(t).unsqueeze(1).shape)
         future = self.future_project(torch.cat([future, future_context], dim=-1)) + self.future_embeddings.to(future.device) + self.time_embed(t).unsqueeze(1)
         future = self.encoder_mlp_1(future)
-        
+
         future_atten = future
         for block in self.encoder_selfattention:
             future_atten = block(future_atten, future_atten)
