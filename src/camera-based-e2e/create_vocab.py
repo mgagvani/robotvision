@@ -84,6 +84,7 @@ def cluster_trajectories(trajectories, n_clusters=1024):
 if __name__ == "__main__":
     all_traj = get_all_trajectories()
     # plot_trajectories(all_traj)
-    cluster_centers = cluster_trajectories(all_traj, n_clusters=16384)
-    plot_trajectories(cluster_centers, name="cluster_centers_16384.png")
-    np.save("./vocab_16384.npy", cluster_centers)
+    N = 8192
+    cluster_centers = cluster_trajectories(all_traj, n_clusters=N)
+    plot_trajectories(cluster_centers, name=f"cluster_centers_{N}.png")
+    np.save(f"./vocab_{N}.npy", cluster_centers)
