@@ -3,6 +3,7 @@ from typing import Optional, Literal
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .blocks import CrossAttention
 
 from dataclasses import dataclass
 
@@ -47,7 +48,7 @@ class GTRSModel(nn.Module):
         self.n_proposals = self.vocab.shape[0]
 
         # out dim check
-        if out_dim is not None and out_dim // 2 == self.vocab.shape[1]:
+        if out_dim is not None and out_dim != self.vocab.shape[1] * 2:
             raise ValueError(f"out_dim should be None or {self.vocab.shape[1] * 2}, but got {out_dim}")
 
 
@@ -64,13 +65,11 @@ class GTRSModel(nn.Module):
             nn.Linear(self.cfg.d_ffn, self.cfg.d_model),
         )
 
-        # big transformer to transform...
-        self.transformer = nn.TransformerDecoder(
-            nn.TransformerDecoderLayer(
-                self.cfg.d_model, self.cfg.n_head, self.cfg.d_ffn,
-                dropout=0.0, batch_first=True
-            ), self.cfg.n_layers
-        )
+        # simpler cross attention
+        self.blocks = nn.ModuleList([
+            CrossAttention(self.cfg.d_model, self.cfg.n_head, self.cfg.d_ffn)
+            for _ in range(self.cfg.n_layers)
+        ])
 
         # ego status encoding
         self.status_encoding = nn.Sequential(
@@ -123,8 +122,6 @@ class GTRSModel(nn.Module):
         visual_tokens = visual_tokens.flatten(start_dim=1, end_dim=2) # (b, n_cameras * n_tokens, d_features)
         tokens: torch.Tensor = self.down_conv(visual_tokens.transpose(1,2)).transpose(1,2) # (b, n_c * n_t, d_model)
 
-        # If training, dropout vocab_dropout trajectories from trajectory vocabulary. 
-        # GTRS shows this improves generalization
         if self.training and self.cfg.vocab_dropout:
             num_select = int(self.cfg.vocab_dropout * self.vocab.shape[0])  # e.g. 0.5 * 1024 = 512
             indices = torch.randperm(self.vocab.shape[0], device=self.vocab.device)[:num_select]
@@ -139,7 +136,11 @@ class GTRSModel(nn.Module):
 
         # (B, N_vocab, d_model) -> (B, N_vocab, d_model)
         # (target sequence, memory sequence) as input
-        tr_out = self.transformer(embedded_vocab.unsqueeze(0).expand(B, -1, -1), tokens) 
+        q = embedded_vocab.unsqueeze(0).expand(B, -1, -1)    
+        for blk in self.blocks:
+            q = blk(q, tokens)
+
+        tr_out = q
 
         # GTRS simply adds this to transformer output
         dist_status = tr_out + self.status_encoding(torch.cat([past.reshape(B, -1), F.one_hot((intent - 1).long(), num_classes=3).float()], dim=1)).unsqueeze(1)
