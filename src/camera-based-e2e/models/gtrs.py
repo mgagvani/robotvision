@@ -48,7 +48,7 @@ class GTRSModel(nn.Module):
         self.n_proposals = self.vocab.shape[0]
 
         # out dim check
-        if out_dim is not None and out_dim // 2 != self.vocab.shape[1]:
+        if out_dim is not None and out_dim != self.vocab.shape[1] * 2:
             raise ValueError(f"out_dim should be None or {self.vocab.shape[1] * 2}, but got {out_dim}")
 
 
