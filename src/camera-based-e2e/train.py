@@ -12,37 +12,47 @@ import pandas as pd
 import torch
 from pathlib import Path
 
-from loader import WaymoE2E
 
 # Replace with your model defined in models/ 
 from models.base_model import LitModel, collate_with_images
-from models.gtrs import GTRSModel
+from models.monocular import DeepMonocularModel
 from models.feature_extractors import SAMFeatures
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_dir', type=str, required=True, help='Path to Waymo E2E data directory')
+    parser.add_argument('--data_dir', type=str, required=True, help='Path to data directory')
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--max_epochs', type=int, default=10, help='Number of epochs to train')
     parser.add_argument('--compile', action='store_true', help='Whether to compile the model with torch.compile')
     parser.add_argument('--profile', action='store_true', help='Whether to run the profiler')
+    parser.add_argument('--dataset', type=str, default='waymo', choices=['waymo', 'nuscenes'], help='Which dataset to train on')
     args = parser.parse_args()
 
     pl.seed_everything(42, workers=True)
 
     # Data
-    train_dataset = WaymoE2E(indexFile='index_train.pkl', data_dir=args.data_dir, n_items=250_000)
-    test_dataset = WaymoE2E(indexFile='index_val.pkl', data_dir=args.data_dir, n_items=25_000)
+    if args.dataset == 'waymo':
+        from loader import WaymoE2E
+        train_dataset = WaymoE2E(indexFile='index_train.pkl', data_dir=args.data_dir, n_items=250_000)
+        test_dataset = WaymoE2E(indexFile='index_val.pkl', data_dir=args.data_dir, n_items=25_000)
+        nw = 0
+    elif args.dataset == 'nuscenes':
+        from nuscenes_loader import NuScenesDataset
+        train_dataset = NuScenesDataset(data_dir=args.data_dir, split='train', n_items=250_000)
+        test_dataset = NuScenesDataset(data_dir=args.data_dir, split='val', n_items=25_000)
+        nw = 16
+    else:
+        raise ValueError(f"Unsupported dataset: {args.dataset}")
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=0, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
-    val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=0, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=nw, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
+    val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=nw, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
 
     # Model
     in_dim = 16 * 6  # Past: (B, 16, 6)
     out_dim = 20 * 2  # Future: (B, 20, 2)
 
-    model = GTRSModel(feature_extractor=SAMFeatures(model_name="timm/vit_pe_spatial_small_patch16_512.fb", frozen=True), out_dim=out_dim)
+    model = DeepMonocularModel(feature_extractor=SAMFeatures(model_name="timm/vit_pe_spatial_small_patch16_512.fb", frozen=True), out_dim=out_dim, n_blocks=4)
     name = str(model.__class__.__name__.replace("Model", "")).lower()
     if args.compile:
         model = torch.compile(model, mode="max-autotune")
@@ -50,7 +60,7 @@ if __name__ == "__main__":
 
     # We don't want to save logs or checkpoints in the home directory - it'll fill up fast
     base_path = Path(args.data_dir).parent.as_posix()
-    timestamp = f"{name}_e2e_{datetime.now().strftime('%Y%m%d_%H%M')}"
+    timestamp = f"{name}_e2e_{args.dataset}_{datetime.now().strftime('%Y%m%d_%H%M')}"
     wandb_logger = WandbLogger(name=timestamp, save_dir=base_path + "/logs", project="robotvision", log_model=True)
     wandb_logger.watch(lit_model, log="all")
 

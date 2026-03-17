@@ -18,6 +18,7 @@ from nuscenes.can_bus.can_bus_api import NuScenesCanBus
 from nuscenes.utils.splits import create_splits_scenes
 
 GET_IMG_DATA = True #  set to false for ad_mlp
+WAYMO_COMPATIBLE = True
 
 # helpers for debugging arbitrary python objects
 def get_type_tree(data):
@@ -78,34 +79,52 @@ def conditional_decorator(decorator: Callable, condition: bool) -> Callable:
 
 class NuScenesDataset(Dataset):
     def __init__(
-        self, nuscenes_path, version="v1.0-trainval", future_seconds=3.0, future_hz=2, past_frames=4, split="train", get_img_data=True
+        self, data_dir, version="v1.0-trainval", future_seconds=3.0, future_hz=2, past_frames=4, split="train", get_img_data=True,
+        n_items: int = None, seed: int = 42
     ):
         """
         Initialize the NuScenes dataset
 
         Args:
-            nuscenes_path: Path to the NuScenes dataset root
+            data_dir: Path to the NuScenes dataset root
             version: NuScenes dataset version
             future_seconds: Number of seconds in the future for trajectory prediction
             future_hz: Frequency in Hz for trajectory points
             past_frames: Number of past frames to collect for ego states (Tp=4)
             split: One of 'train', 'val', 'test', 'mini_train', 'mini_val'
         """
-        self.nusc = NuScenes(version=version, dataroot=nuscenes_path, verbose=True)
-        self.nusc_can = NuScenesCanBus(dataroot=nuscenes_path)
+        global GET_IMG_DATA
+        self.nusc = NuScenes(version=version, dataroot=data_dir, verbose=True)
+        self.nusc_can = NuScenesCanBus(dataroot=data_dir)
         self.version = version
         self.split = split
-        self.future_seconds = future_seconds
-        self.future_hz = future_hz
-        self.future_steps = int(future_seconds * future_hz)
-        self.past_frames = past_frames
-        global GET_IMG_DATA
+        if WAYMO_COMPATIBLE:
+            # In waymo, future is 20, 2 @ 4Hz. Override defaults
+            print(f"Overriding future_hz from {future_hz} to 4, future_seconds from {future_seconds} to 5.0, and past_frames from {past_frames} to 16 for Waymo compatibility.")
+            self.future_hz = 4
+            self.future_seconds = 5.0
+            self.past_frames = 16
+        else:
+            self.future_seconds = future_seconds
+            self.future_hz = future_hz
+            self.past_frames = past_frames
+        self.future_steps = int(self.future_seconds * self.future_hz)
+        # NuScenes keyframes are ~2Hz; use interpolation only when requesting denser futures.
+        self.need_interpolation = self.future_hz > 2
         GET_IMG_DATA = get_img_data
         self.get_img_data = GET_IMG_DATA
         
         # Filter samples by split
         self.scenes = self._get_scenes()
         self.samples = self._filter_samples()
+
+        # Filter to n_items
+        # TODO: Improve sampling strategy when we get to using multiple consecutive frames.
+        if n_items is not None and n_items < len(self.samples):
+            total = len(self.samples)
+            rng = np.random.default_rng(seed)
+            indices = rng.choice(total, size=n_items, replace=False)
+            self.samples = [self.samples[i] for i in indices]
 
     def _get_scenes(self):
         """Get scene names for the specified split."""
@@ -210,7 +229,14 @@ class NuScenesDataset(Dataset):
 
                 # Get image
                 img_path = self._resolve_sample_file_path(sensor_sample_data["filename"])
-                sensor_dict["img"] = np.array(Image.open(img_path))
+                if not WAYMO_COMPATIBLE:
+                    # in normal operation, we want to load the image. 
+                    # although loading images w/o batching incurs IPC costs, as well as is slow in general
+                    sensor_dict["img"] = np.array(Image.open(img_path))
+                else:
+                    # in waymo-compatible mode, we want to return the raw JPEG bytes instead of loading the image, to avoid IPC and loading costs
+                    with open(img_path, "rb") as f:
+                        sensor_dict["img"] = f.read()
 
                 # Get calibration info
                 calibrated_sensor = self.nusc.get(
@@ -298,16 +324,50 @@ class NuScenesDataset(Dataset):
         ego_trajectory = self._get_past_ego_trajectory(sample)
         ego_velocity = self._get_ego_velocity(sample)
         ego_acceleration = self._get_ego_acceleration(sample)
-            
-        output = {
-            "sensor_data": sensor_data,
-            "trajectory": trajectory_local,
-            "command": one_hot_command,
-            "ego_trajectory": ego_trajectory,
-            "ego_velocity": ego_velocity,
-            "ego_acceleration": ego_acceleration,
-            "scene_start": new_scene,
-        }
+        
+        if not WAYMO_COMPATIBLE:
+            # original 
+            output = {
+                "sensor_data": sensor_data,
+                "trajectory": trajectory_local,
+                "command": one_hot_command,
+                "ego_trajectory": ego_trajectory,
+                "ego_velocity": ego_velocity,
+                "ego_acceleration": ego_acceleration,
+                "scene_start": new_scene,
+            }
+        else:
+            # new. keys are PAST (B, 16, 6), FUTURE (B, 20, 2), INTENT (B,), IMAGES_JPEG (B, 8) w/ raw JPEG bytes
+
+            # Build (past_frames, 6): [x, y, vx, vy, ax, ay]
+            # Convert past positions from world frame to current ego-local frame
+            # so PAST and FUTURE are represented in the same coordinates.
+            past_xy_world = ego_trajectory[:, :2]
+            past_x = (R_world_to_ego[:2, :2] @ (past_xy_world - t0[:2]).T).T.astype(np.float32)
+            past_v = np.repeat(ego_velocity[:2][None, :], self.past_frames, axis=0)
+            past_a = np.repeat(ego_acceleration[:2][None, :], self.past_frames, axis=0)
+            past_ego = np.concatenate([past_x, past_v, past_a], axis=-1).astype(np.float32)
+            future_xy = trajectory_local[:, :2]
+            intent = int(np.argmax(one_hot_command[0]) + 1) # Convert one-hot index to 1,2,3
+
+            # Re-order the cameras, given indices in waymo are 1, 2, 3, 7, 4, 5, 6, 8 for F, FL, FR, R, L, R, BL, BR
+            # NuScenes is missing L and R cameras
+            # Turn it into a list instead of dict
+            cam_order = ["CAM_BACK", "CAM_FRONT", "CAM_FRONT_LEFT", "CAM_FRONT_RIGHT", "CAM_BACK_LEFT", "CAM_BACK_RIGHT"]
+            images_jpeg = []
+            for cam_name in cam_order:
+                if cam_name in sensor_data:
+                    images_jpeg.append(sensor_data[cam_name]["img"])
+                else:
+                    raise ValueError(f"Expected camera {cam_name} not found in sensor data for sample index {idx}. Available cameras: {list(sensor_data.keys())}")
+            output = {
+                "PAST": past_ego,  # (B, 16, 6)
+                "FUTURE": future_xy,  # (B, 20, 2)
+                "INTENT": intent,  # (B,)
+                "IMAGES_JPEG": images_jpeg,  # list of length 6 with raw JPEG bytes or None
+                "NAME": sample["token"], # for debugging
+            }
+
 
         return output
 
@@ -326,6 +386,40 @@ class NuScenesDataset(Dataset):
         """
         if self.future_steps == 0:
             return np.empty((0, 3), dtype=np.float32)
+
+        if self.need_interpolation:
+            # Interpolate in world coordinates to support future_hz > 2Hz.
+            anchor_t = []
+            anchor_xyz = []
+
+            cur = sample
+            while True:
+                lidar_sd = self.nusc.get("sample_data", cur["data"]["LIDAR_TOP"])
+                ego_pose = self.nusc.get("ego_pose", lidar_sd["ego_pose_token"])
+                anchor_t.append(cur["timestamp"] * 1e-6)
+                anchor_xyz.append(np.asarray(ego_pose["translation"], dtype=np.float64))
+
+                if not cur["next"]:
+                    break
+                cur = self.nusc.get("sample", cur["next"])
+
+            anchor_t = np.asarray(anchor_t, dtype=np.float64)
+            anchor_xyz = np.asarray(anchor_xyz, dtype=np.float64)
+
+            # Deduplicate timestamps defensively in case of repeated keys.
+            unique_t, unique_idx = np.unique(anchor_t, return_index=True)
+            anchor_t = unique_t
+            anchor_xyz = anchor_xyz[unique_idx]
+
+            t0 = sample["timestamp"] * 1e-6
+            dt = 1.0 / float(self.future_hz)
+            target_t = t0 + dt * np.arange(1, self.future_steps + 1, dtype=np.float64)
+
+            traj = np.empty((self.future_steps, 3), dtype=np.float64)
+            traj[:, 0] = np.interp(target_t, anchor_t, anchor_xyz[:, 0])
+            traj[:, 1] = np.interp(target_t, anchor_t, anchor_xyz[:, 1])
+            traj[:, 2] = np.interp(target_t, anchor_t, anchor_xyz[:, 2])
+            return traj.astype(np.float32)
 
         trajectory_points = []
         current_sample_token = sample["token"]
