@@ -344,8 +344,13 @@ class NuScenesDataset(Dataset):
             # so PAST and FUTURE are represented in the same coordinates.
             past_xy_world = ego_trajectory[:, :2]
             past_x = (R_world_to_ego[:2, :2] @ (past_xy_world - t0[:2]).T).T.astype(np.float32)
-            past_v = np.repeat(ego_velocity[:2][None, :], self.past_frames, axis=0)
-            past_a = np.repeat(ego_acceleration[:2][None, :], self.past_frames, axis=0)
+
+            # NuScenes keyframes are sampled at 2 Hz, so estimate past kinematics
+            # directly from the localized trajectory instead of repeating the
+            # current timestep velocity + acceleration from the can bus expansion
+            dt_past = 0.5
+            past_v = np.gradient(past_x, dt_past, axis=0).astype(np.float32)
+            past_a = np.gradient(past_v, dt_past, axis=0).astype(np.float32)
             past_ego = np.concatenate([past_x, past_v, past_a], axis=-1).astype(np.float32)
             future_xy = trajectory_local[:, :2]
             intent = int(np.argmax(one_hot_command[0]) + 1) # Convert one-hot index to 1,2,3
