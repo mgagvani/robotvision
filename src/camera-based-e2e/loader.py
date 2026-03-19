@@ -1,5 +1,5 @@
 import torch
-from torch.utils.data import IterableDataset
+from torch.utils.data import Dataset
 from protos import e2e_pb2
 import pickle
 import os
@@ -11,7 +11,7 @@ devices = ['cuda:0', 'cuda:1']
 
 random.seed(42) # Deterministic
 
-class WaymoE2E(IterableDataset): 
+class WaymoE2E(Dataset): 
     def __init__(
         self,
         indexFile = 'index.pkl',
@@ -38,61 +38,51 @@ class WaymoE2E(IterableDataset):
             start = rng.randint(0, total - n_items)
             self.indexes = self.indexes[start : start + n_items]
 
-    def global_rank(self) -> tuple[int, int]:
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            return torch.distributed.get_rank(), torch.distributed.get_world_size()
-        
-        return int(os.environ.get("RANK", "0")), int(os.environ.get("WORLD_SIZE", "1"))
-
     def __len__(self):
-        _, world_size = self.global_rank()
-        return len(self.indexes) // world_size
-    
-    def __iter__(self):
-        worker = torch.utils.data.get_worker_info()
-        if worker is None:
-            start, step = self.global_rank()
-        else:
-            rank, world_size = self.global_rank()
-            global_worker_id = rank * worker.num_workers + worker.id
-            global_num_workers = world_size * worker.num_workers
-            start, step = global_worker_id, global_num_workers
+        return len(self.indexes)
 
-        for idx in range(start, len(self.indexes), step):
-            frame = e2e_pb2.E2EDFrame()  # type: ignore
-            filename, start_byte, byte_length = self.indexes[idx]
+    def __getitem__(self, idx):
+        frame = e2e_pb2.E2EDFrame()  # type: ignore
+        filename, start_byte, byte_length = self.indexes[idx]
 
-            if self.filename != filename:
-                if self.file:
-                    self.file.close()
-                    del self.file
-                self.file = open(os.path.join(self.data_dir, filename), 'rb')
-                self.filename = filename
+        if self.filename != filename:
+            if self.file:
+                self.file.close()
+                del self.file
+            self.file = open(os.path.join(self.data_dir, filename), 'rb')
+            self.filename = filename
 
-            self.file.seek(start_byte) # type: ignore
-            protobuf = self.file.read(byte_length) # type: ignore
-            frame.ParseFromString(protobuf)
+        self.file.seek(start_byte) # type: ignore
+        protobuf = self.file.read(byte_length) # type: ignore
+        frame.ParseFromString(protobuf)
 
-            past = np.stack([frame.past_states.pos_x, frame.past_states.pos_y, frame.past_states.vel_x, frame.past_states.vel_y, frame.past_states.accel_x, frame.past_states.accel_y], axis=-1)
-    
+        past = np.stack(
+            [
+                frame.past_states.pos_x,
+                frame.past_states.pos_y,
+                frame.past_states.vel_x,
+                frame.past_states.vel_y,
+                frame.past_states.accel_x,
+                frame.past_states.accel_y,
+            ],
+            axis=-1,
+        )
 
-            future = np.stack([frame.future_states.pos_x, frame.future_states.pos_y], axis=-1)
+        future = np.stack([frame.future_states.pos_x, frame.future_states.pos_y], axis=-1)
 
-            past = np.array(past, dtype=np.float32) # ensure consistent dtype
-            future = np.array(future, dtype=np.float32)
+        past = np.array(past, dtype=np.float32) # ensure consistent dtype
+        future = np.array(future, dtype=np.float32)
 
-            # For submission to waymo evaluation server
-            name = frame.frame.context.name
+        # For submission to waymo evaluation server
+        name = frame.frame.context.name
 
-            # Yield JPEG images as torch uint8 tensors so that PyTorch
-            # DataLoader transfers them via shared memory instead of
-            # pickle serialization — critical for multi-worker / DDP perf.
-            jpeg_tensors = [
-                torch.from_numpy(np.frombuffer(img.image, dtype=np.uint8).copy())
-                for img in frame.frame.images
-            ]
+        # Return JPEG images as torch uint8 tensors so DataLoader can use shared memory.
+        jpeg_tensors = [
+            torch.from_numpy(np.frombuffer(img.image, dtype=np.uint8).copy())
+            for img in frame.frame.images
+        ]
 
-            yield {'PAST': past, 'FUTURE': future, 'IMAGES_JPEG': jpeg_tensors, 'INTENT': frame.intent, 'NAME': name}
+        return {'PAST': past, 'FUTURE': future, 'IMAGES_JPEG': jpeg_tensors, 'INTENT': frame.intent, 'NAME': name}
 
 
 def collate_with_images(batch):
