@@ -3,17 +3,13 @@ import os
 from functools import cache
 from typing import Callable
 
-import cv2
-import matplotlib.pyplot as plt
 import numpy as np
-import torch
-from matplotlib.animation import FuncAnimation
 from PIL import Image
 from pyquaternion import Quaternion
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
 
 from nuscenes.nuscenes import NuScenes
-from nuscenes.utils.geometry_utils import view_points
+# from nuscenes.utils.geometry_utils import view_points
 from nuscenes.can_bus.can_bus_api import NuScenesCanBus
 from nuscenes.utils.splits import create_splits_scenes
 
@@ -285,7 +281,8 @@ class NuScenesDataset(Dataset):
         # Determine high-level command
         # Command is based on displacement at 3 seconds in the future.
         # Please note this is referenced from AD-MLP paper.
-        # One-hot encoding: [Turn Left, Go Straight, Turn Right]
+        # One-hot encoding used by the original NuScenes loader path:
+        # [Turn Left, Go Straight, Turn Right]
         one_hot_command = np.zeros((1, 3), dtype=np.float32)
 
         if self.future_steps > 0 and trajectory_local.shape[0] > 0:
@@ -353,7 +350,11 @@ class NuScenesDataset(Dataset):
             past_a = np.gradient(past_v, dt_past, axis=0).astype(np.float32)
             past_ego = np.concatenate([past_x, past_v, past_a], axis=-1).astype(np.float32)
             future_xy = trajectory_local[:, :2]
-            intent = int(np.argmax(one_hot_command[0]) + 1) # Convert one-hot index to 1,2,3
+            # Waymo's canonical enum is 1=STRAIGHT, 2=LEFT, 3=RIGHT, but
+            # one_hot_command is ordered [LEFT, STRAIGHT, RIGHT].
+            waymo_intent_by_command_idx = (2, 1, 3)
+            command_idx = int(np.argmax(one_hot_command[0]))
+            intent = waymo_intent_by_command_idx[command_idx]
 
             # Re-order the cameras, given indices in waymo are 1, 2, 3, 7, 4, 5, 6, 8 for F, FL, FR, R, L, R, BL, BR
             # NuScenes is missing L and R cameras

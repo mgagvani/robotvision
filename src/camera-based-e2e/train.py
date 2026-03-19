@@ -75,11 +75,30 @@ class HomogeneousConcatBatchSampler(BatchSampler):
     def set_epoch(self, epoch: int):
         self.epoch = int(epoch)
 
+    def _num_samples_per_rank(self, length: int) -> int:
+        if length <= 0:
+            return 0
+        if self.drop_last and length % self.world_size != 0:
+            return math.ceil((length - self.world_size) / self.world_size)
+        return math.ceil(length / self.world_size)
+
     def _make_rank_indices(self, start: int, length: int, rng: random.Random):
         idx = list(range(start, start + length))
         if self.shuffle:
             rng.shuffle(idx)
-        return idx[self.rank :: self.world_size]
+        num_samples = self._num_samples_per_rank(length)
+        total_size = num_samples * self.world_size
+
+        if self.drop_last:
+            idx = idx[:total_size]
+        elif total_size > len(idx):
+            if not idx:
+                return []
+            padding_size = total_size - len(idx)
+            repeats = math.ceil(padding_size / len(idx))
+            idx += (idx * repeats)[:padding_size]
+
+        return idx[self.rank : total_size : self.world_size]
 
     def _chunk(self, indices: list[int]) -> list[list[int]]:
         if self.drop_last:
@@ -127,7 +146,7 @@ class HomogeneousConcatBatchSampler(BatchSampler):
 
     def __len__(self):
         def n_batches(length: int):
-            per_rank = (length + self.world_size - 1 - self.rank) // self.world_size
+            per_rank = self._num_samples_per_rank(length)
             if self.drop_last:
                 return per_rank // self.batch_size
             return math.ceil(per_rank / self.batch_size)
@@ -138,7 +157,7 @@ class HomogeneousConcatBatchSampler(BatchSampler):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--data_dir", type=str, required=False, help="Path to data directory"
+        "--data_dir", type=str, required=True, help="Path to data directory"
     )
     parser.add_argument(
         "--batch_size", type=int, default=16, help="Batch size for training"
@@ -303,12 +322,13 @@ if __name__ == "__main__":
     wandb_logger.watch(lit_model, log="all")
 
     strategy = "ddp" if torch.cuda.device_count() > 1 else "auto"
+    use_distributed_sampler = args.dataset != "all"
     torch.set_float32_matmul_precision("medium")
     trainer = pl.Trainer(
         max_epochs=args.max_epochs,
         logger=[CSVLogger(base_path + "/logs", name=timestamp), wandb_logger],
         strategy=strategy,
-        use_distributed_sampler=False,
+        use_distributed_sampler=use_distributed_sampler,
         precision="bf16-mixed" if torch.cuda.is_bf16_supported() else 16,
         log_every_n_steps=10,
         profiler=SimpleProfiler(extended=True) if args.profile else None,
