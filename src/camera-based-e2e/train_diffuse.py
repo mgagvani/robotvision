@@ -35,8 +35,8 @@ if __name__ == "__main__":
     train_dataset = WaymoE2E(indexFile='index_train.pkl', data_dir=args.data_dir, n_items=250_000)
     test_dataset = WaymoE2E(indexFile='index_val.pkl', data_dir=args.data_dir, n_items=50_000)
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=8, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
-    val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=8, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=1, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
+    val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=1, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
 
     # Model
     in_dim = 16 * 6  # Past: (B, 16, 6)

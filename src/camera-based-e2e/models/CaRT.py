@@ -190,9 +190,9 @@ class ResNetCaRT(nn.Module):
         local_features = self.fpn([x1_c, x2_c, x3_c, x4_c])
         
         global_features_upsampled = F.interpolate(
-            global_features, 
-            size=local_features.shape[2:], 
-            mode='bilinear', 
+            global_features,
+            size=local_features.shape[2:],
+            mode='bilinear',
             align_corners=False
         )
         
