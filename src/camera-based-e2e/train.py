@@ -303,7 +303,6 @@ if __name__ == "__main__":
             model_name="timm/vit_pe_spatial_small_patch16_512.fb", frozen=True
         ),
         out_dim=out_dim,
-        n_blocks=4,
     )
     name = str(model.__class__.__name__.replace("Model", "")).lower()
     if args.compile:

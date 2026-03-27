@@ -234,8 +234,15 @@ class LitModel(pl.LightningModule):
         pred_future = self.forward(model_inputs)  # (B, T*2)
         pred_depth = None
         pred_scores: torch.Tensor = None
+        pred_traj_flat: torch.Tensor = None
+        query_for_score: torch.Tensor = None
         if isinstance(pred_future, dict):
-            pred_future, pred_depth, pred_scores = pred_future["trajectory"], pred_future.get("depth", None), pred_future.get("scores", None)
+            outputs = pred_future
+            pred_future = outputs["trajectory"]
+            pred_depth = outputs.get("depth", None)
+            pred_scores = outputs.get("scores", None)
+            pred_traj_flat = outputs.get("trajectory_flat", None)
+            query_for_score = outputs.get("query_for_score", None)
 
         pred = pred_future
         t_steps = future.shape[1]
@@ -310,6 +317,40 @@ class LitModel(pl.LightningModule):
         else:
             loss_score = torch.tensor(0.0, device=self.device)
 
+        # Train-only adversarial scorer supervision in trajectory space.
+        loss_adv = torch.tensor(0.0, device=self.device)
+        adv_enabled = bool(getattr(self.hparams, "model_cfg_adv_enabled", False))
+        if (stage == "train" and adv_enabled and k_modes > 1 and pred_scores is not None and pred_traj_flat is not None and query_for_score is not None and hasattr(self.model, "traj_features") and hasattr(self.model, "score_decoder")):
+            epsilon = float(getattr(self.hparams, "model_cfg_adv_epsilon", 0.10)) # max perturbation
+            adv_steps = max(1, int(getattr(self.hparams, "model_cfg_adv_steps", 3))) # running Projected Gradient Descent
+            alpha = epsilon / adv_steps
+
+            original_traj = pred_traj_flat.detach()
+            adv_traj = original_traj
+            for _ in range(adv_steps):
+                # run forward pass of scorer on adversarial trajectory
+                attack_traj = adv_traj.detach().requires_grad_(True)
+                traj_feat_adv = self.model.traj_features(attack_traj)
+                score_adv = self.model.score_decoder(
+                    torch.cat([query_for_score, traj_feat_adv], dim=-1)
+                ).squeeze(-1)
+
+                # compute gradient, gradient ASCENT to MAXIMIZE loss.
+                grad = torch.autograd.grad(score_adv.sum(), attack_traj, only_inputs=True)[0]
+                adv_traj = attack_traj + alpha * grad.sign()
+                delta = torch.clamp(adv_traj - original_traj, min=-epsilon, max=epsilon)
+                adv_traj = (original_traj + delta).detach()
+
+            bsz, _, t2_adv = adv_traj.shape
+            t_adv = t2_adv // 2
+            adv_ade = torch.norm(adv_traj.view(bsz, k_modes, t_adv, 2) - future[:, None], dim=-1,).mean(dim=-1).detach()
+            # Replicate DeepMonocularModel foward pass
+            adv_traj_feat = self.model.traj_features(adv_traj)
+            adv_scores = self.model.score_decoder(
+                torch.cat([query_for_score, adv_traj_feat], dim=-1)
+            ).squeeze(-1)
+            loss_adv = F.mse_loss(adv_scores, adv_ade)
+
         # Scorer Metrics
         scorer_metrics = {}
         if k_modes > 1 and pred_scores is not None:
@@ -341,13 +382,15 @@ class LitModel(pl.LightningModule):
         loss_depth *= 0.1 # slightly enabled
         loss_ade *= 1.0 # TODO: tune loss terms
         loss_score *= 1.0
-        total_loss = loss_ade + loss_depth + loss_score + loss_rfs
+        adv_lambda = float(getattr(self.hparams, "model_cfg_adv_lambda", 0.1))
+        total_loss = loss_ade + loss_depth + loss_score + loss_rfs + (adv_lambda * loss_adv)
         # TODO: improve logging both to disk and to console
         log_payload = {
             f"{stage}_loss_ade": loss_ade,
             f"{stage}_loss_score": loss_score,
             f"{stage}_loss_depth": loss_depth,
             f"{stage}_loss_rfs": loss_rfs,
+            f"{stage}_loss_adv": loss_adv,
             f"{stage}_rfs_unweighted": rfs_unweighted,
             f"{stage}_loss": total_loss,
         }
