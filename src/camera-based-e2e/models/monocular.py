@@ -11,6 +11,7 @@ class DeepMonocularConfig:
     # arch
     n_blocks: int = 4
     n_proposals: int = 50
+    cam_idxs_used: list = (1,) # front only
     # kinematics
     dt: float = 0.25
     max_accel: float = 8.0
