@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from dataclasses import dataclass
 from math import sqrt
 
 from .blocks import TransformerBlock
@@ -77,6 +78,22 @@ class MonocularModel(nn.Module):
         attention = self.attn_norm(attention)
         return self.decoder(attention.squeeze(1))  # (B, 40)
 
+@dataclass
+class DeepMonocularConfig:
+    # arch
+    n_blocks: int = 4
+    n_proposals: int = 50
+    cam_idxs_used: list = (1,) # front only
+    # kinematics
+    dt: float = 0.25
+    max_accel: float = 8.0
+    max_omega: float = 1.0
+    # adversarial training
+    adv_enabled: bool = True
+    adv_lambda: float = 0.1
+    adv_epsilon: float = 0.10
+    adv_steps: int = 3
+
 class DeepMonocularModel(nn.Module):
     def __init__(
         self,
@@ -89,14 +106,21 @@ class DeepMonocularModel(nn.Module):
         max_omega: float = 1.0,
     ):
         super().__init__()
+        self.cfg = DeepMonocularConfig(
+            n_blocks=n_blocks,
+            n_proposals=n_proposals,
+            dt=dt,
+            max_accel=max_accel,
+            max_omega=max_omega,
+        )
         self.features = feature_extractor
         self.feature_dim = sum(self.features.dims)
         if out_dim % 2 != 0:
             raise ValueError(f"out_dim must be even for (x,y) rollout, got {out_dim}")
         self.horizon = out_dim // 2
-        self.dt = dt
-        self.max_accel = max_accel
-        self.max_omega = max_omega
+        self.dt = self.cfg.dt
+        self.max_accel = self.cfg.max_accel
+        self.max_omega = self.cfg.max_omega
         
         # Initial Query Projection (Intent + Past -> C)
         query_input_dim = 3 + 16 * 6
@@ -116,7 +140,7 @@ class DeepMonocularModel(nn.Module):
         # Deep network rather than single attention in MonocularModel 
         self.blocks = nn.ModuleList([
             TransformerBlock(self.feature_dim, num_heads=8, mlp_dim=self.feature_dim*4)
-            for _ in range(n_blocks)
+            for _ in range(self.cfg.n_blocks)
         ])
 
         # For Supervised Depth Loss -> (B, 128, 128)
@@ -130,7 +154,7 @@ class DeepMonocularModel(nn.Module):
             nn.Conv2d(32, 1, 1)
         )
         
-        self.n_proposals = n_proposals
+        self.n_proposals = self.cfg.n_proposals
         self.traj_decoder = nn.Sequential(
             nn.Linear(self.feature_dim, self.feature_dim),
             nn.GELU(),

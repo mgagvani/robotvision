@@ -26,6 +26,9 @@ class LitModel(pl.LightningModule):
         super(LitModel, self).__init__()
         self.model = model
 
+        # NVJPEG fall back if we are running on Negishi AMD GPU
+        self.has_nvjpeg = True
+
         # If we are using ScorerModel, which has a cfg, then save the attributes of the cfg as hparams, so they go into wandb
         cfg = getattr(model, "cfg", None)
         if cfg is None:
@@ -81,12 +84,17 @@ class LitModel(pl.LightningModule):
         self,
         images_jpeg: list[list[torch.Tensor]],
         device: torch.device | None = None,
-    ) -> list[torch.Tensor]:
+    ) -> list[torch.Tensor | None]:
+        model_cfg = getattr(self.model, "cfg", None)
+        cam_idxs_used = tuple(getattr(model_cfg, "cam_idxs_used", range(len(images_jpeg))))
         decode_device = self.device if device is None else device
+
+        selected = [(cam_idx, images_jpeg[cam_idx]) for cam_idx in cam_idxs_used]
+
         # Flatten cameras
         flat_encoded, cam_sizes = [], []
-        for cam in images_jpeg:
-            cam_sizes.append(len(cam))
+        for cam_idx, cam in selected:
+            cam_sizes.append((cam_idx, len(cam)))
             for jpg in cam:
                 t = jpg if isinstance(jpg, torch.Tensor) else torch.frombuffer(memoryview(jpg), dtype=torch.uint8)
                 # decode_jpeg requires the raw jpeg bytes to be on cpu
@@ -94,18 +102,30 @@ class LitModel(pl.LightningModule):
                     t = t.cpu()
                 flat_encoded.append(t)
         
-        flat_decoded = torchvision.io.decode_jpeg(
-            flat_encoded, 
-            mode=torchvision.io.ImageReadMode.UNCHANGED,
-            device=decode_device,
-        ) # list of (C, H, W) gpu tensors
+        try:
+            flat_decoded = torchvision.io.decode_jpeg(
+                flat_encoded, 
+                mode=torchvision.io.ImageReadMode.UNCHANGED,
+                device=decode_device,
+            ) # list of (C, H, W) gpu tensors
+        except Exception as e:
+            if "nvJPEG" not in str(e):
+                raise e
+            self.has_nvjpeg = False
+            flat_decoded = torchvision.io.decode_jpeg(
+                flat_encoded,
+                mode=torchvision.io.ImageReadMode.UNCHANGED,
+                device="cpu",
+            )
+            if torch.device(decode_device).type == "cuda":
+                flat_decoded = [img.to(decode_device, non_blocking=True) for img in flat_decoded]
 
-        out = []
+        out = [None] * len(images_jpeg)
         idx = 0
-        for n in cam_sizes:
-            cam_list = flat_decoded[idx: idx+n]
+        for cam_idx, n in cam_sizes:
+            out[cam_idx] = torch.stack(flat_decoded[idx:idx+n], dim=0)
             idx += n
-            out.append(torch.stack(cam_list, dim=0))  # (B, C, H, W)
+
         return out
 
     def on_fit_start(self) -> None:
