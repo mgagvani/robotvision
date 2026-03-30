@@ -391,7 +391,8 @@ class LitModel(pl.LightningModule):
             scorer_metrics[f"{stage}_scorer_spearman"] = rho.mean()
 
         # Depth Loss
-        if pred_depth is not None:
+        use_depth_loss = bool(getattr(self.hparams, "model_cfg_use_depth_loss", False))
+        if pred_depth is not None and use_depth_loss:
             front_img = images[1]  # front camera
             depth_in = F.interpolate(front_img, size=(128, 128), mode='nearest')
             loss_depth = self.depth_loss(depth_in, pred_depth, loss_fn=F.l1_loss)

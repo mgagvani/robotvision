@@ -16,6 +16,8 @@ class DeepMonocularConfig:
     dt: float = 0.25
     max_accel: float = 8.0
     max_omega: float = 1.0
+    # training
+    use_depth_loss: bool = False
     # adversarial training
     adv_enabled: bool = True
     adv_lambda: float = 0.1
