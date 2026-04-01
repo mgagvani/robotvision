@@ -21,6 +21,7 @@ class WaymoE2E(IterableDataset):
     ):
         self.data_dir = data_dir
         self.seed = seed
+        self._index_file = indexFile
 
         self.filename = ""
         self.file = None
@@ -66,7 +67,16 @@ class WaymoE2E(IterableDataset):
                 if self.file:
                     self.file.close()
                     del self.file
-                self.file = open(os.path.join(self.data_dir, filename), 'rb')
+                # #region agent log
+                _full = os.path.join(self.data_dir, filename)
+                _logpath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug-aec3fc.log")
+                try:
+                    _line = '{"sessionId":"aec3fc","hypothesisId":"H3,H4,H5","location":"loader.py:open","message":"file_open_attempt","data":{"data_dir":"%s","filename":"%s","full_path":"%s","exists":%s,"index_file":"%s"}}\n' % (str(self.data_dir), str(filename), str(_full), str(os.path.exists(_full)), str(getattr(self, "_index_file", "?")))
+                    open(_logpath, "a").write(_line)
+                except Exception:
+                    pass
+                # #endregion
+                self.file = open(_full, 'rb')
                 self.filename = filename
 
             self.file.seek(start_byte) # type: ignore
@@ -100,7 +110,7 @@ if __name__ == "__main__":
     import time
     from tqdm import tqdm
     # NOTE: Replace with your path
-    DATA_DIR = '/anvil/scratch/x-mgagvani/wod/waymo_end_to_end_camera_v1_0_0/waymo_open_dataset_end_to_end_camera_v_1_0_0'
+    DATA_DIR = '/scratch/gilbreth/mathur91/waymo/waymo_open_dataset_end_to_end_camera_v_1_0_0'
     BATCH_SIZE = 256
     dataset = WaymoE2E(indexFile="index_train.pkl", data_dir = DATA_DIR, images=True)
     loader = DataLoader(
