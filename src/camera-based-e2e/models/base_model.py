@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 import torchvision
+from contextlib import nullcontext
 from dataclasses import asdict, is_dataclass
 
 from .losses.depth_loss import DepthLoss
@@ -230,10 +231,10 @@ class LitModel(pl.LightningModule):
         return optimizer
     
     # ---- forward / step ----
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
         return self.model(x)
     
-    def _shared_step(self, batch: torch.Tensor, stage: str) -> torch.Tensor:
+    def _shared_step(self, batch: dict[str, torch.Tensor | list[torch.Tensor]], stage: str) -> torch.Tensor:
         past, future, intent = batch['PAST'], batch['FUTURE'], batch['INTENT']
 
         if "IMAGES" in batch:
@@ -339,7 +340,7 @@ class LitModel(pl.LightningModule):
         # Train-only adversarial scorer supervision in trajectory space.
         loss_adv = torch.tensor(0.0, device=self.device)
         adv_enabled = bool(getattr(self.hparams, "model_cfg_adv_enabled", False))
-        if (stage == "train" and adv_enabled and k_modes > 1 and pred_scores is not None and pred_traj_flat is not None and query_for_score is not None and hasattr(self.model, "traj_features") and hasattr(self.model, "score_decoder")):
+        if (stage == "train" and adv_enabled and k_modes > 1 and pred_scores is not None and pred_traj_flat is not None and query_for_score is not None and hasattr(self.model, "score_trajectories")):
             epsilon = float(getattr(self.hparams, "model_cfg_adv_epsilon", 0.10)) # max perturbation
             adv_steps = max(1, int(getattr(self.hparams, "model_cfg_adv_steps", 3))) # running Projected Gradient Descent
             alpha = epsilon / adv_steps
@@ -349,10 +350,7 @@ class LitModel(pl.LightningModule):
             for _ in range(adv_steps):
                 # run forward pass of scorer on adversarial trajectory
                 attack_traj = adv_traj.detach().requires_grad_(True)
-                traj_feat_adv = self.model.traj_features(attack_traj)
-                score_adv = self.model.score_decoder(
-                    torch.cat([query_for_score, traj_feat_adv], dim=-1)
-                ).squeeze(-1)
+                score_adv = self.model.score_trajectories(attack_traj, query_for_score)
 
                 # compute gradient, gradient ASCENT to MAXIMIZE loss.
                 grad = torch.autograd.grad(score_adv.sum(), attack_traj, only_inputs=True)[0]
@@ -363,12 +361,42 @@ class LitModel(pl.LightningModule):
             bsz, _, t2_adv = adv_traj.shape
             t_adv = t2_adv // 2
             adv_ade = torch.norm(adv_traj.view(bsz, k_modes, t_adv, 2) - future[:, None], dim=-1,).mean(dim=-1).detach()
-            # Replicate DeepMonocularModel foward pass
-            adv_traj_feat = self.model.traj_features(adv_traj)
-            adv_scores = self.model.score_decoder(
-                torch.cat([query_for_score, adv_traj_feat], dim=-1)
-            ).squeeze(-1)
+            adv_scores = self.model.score_trajectories(adv_traj, query_for_score)
             loss_adv = F.mse_loss(adv_scores, adv_ade)
+
+        # Sobolev training. d(Score)/d(traj) ~= d(ADE)/d(traj)
+        loss_sobolev = torch.tensor(0.0, device=self.device)
+        sobolev_grad_cosine = torch.tensor(0.0, device=self.device)
+        sobolev_enabled = bool(getattr(self.hparams, "model_cfg_sobolev_enabled", False))
+        if (stage == "train" and sobolev_enabled and k_modes > 1 and pred_scores is not None and pred_traj_flat is not None and query_for_score is not None and hasattr(self.model, "score_trajectories")):
+            autocast_device = pred_traj_flat.device.type
+            autocast_ctx = (
+                torch.autocast(device_type=autocast_device, enabled=False)
+                if autocast_device in ("cpu", "cuda")
+                else nullcontext()
+            )
+            with autocast_ctx:
+                sobolev_traj = pred_traj_flat.detach().float().requires_grad_(True)
+                sobolev_query = query_for_score.detach().float()
+                sobolev_scores = self.model.score_trajectories(sobolev_traj, sobolev_query)
+                grad_score = torch.autograd.grad(
+                    sobolev_scores.sum(),
+                    sobolev_traj,
+                    create_graph=True,
+                    only_inputs=True,
+                )[0]
+
+                sobolev_traj_xy = sobolev_traj.view(pred.size(0), k_modes, t_steps, 2)
+                delta = sobolev_traj_xy - future[:, None].float()
+                dist = torch.norm(delta, dim=-1, keepdim=True).clamp_min(1e-3)
+                grad_ade = (delta / (t_steps * dist)).reshape_as(sobolev_traj)
+
+                loss_sobolev = F.smooth_l1_loss(grad_score, grad_ade.detach())
+                sobolev_grad_cosine = F.cosine_similarity(
+                    grad_score.reshape(pred.size(0), k_modes, -1),
+                    grad_ade.reshape(pred.size(0), k_modes, -1),
+                    dim=-1,
+                ).mean()
 
         # Scorer Metrics
         scorer_metrics = {}
@@ -403,7 +431,8 @@ class LitModel(pl.LightningModule):
         loss_ade *= 1.0 # TODO: tune loss terms
         loss_score *= 1.0
         adv_lambda = float(getattr(self.hparams, "model_cfg_adv_lambda", 0.1))
-        total_loss = loss_ade + loss_depth + loss_score + loss_rfs + (adv_lambda * loss_adv)
+        sobolev_lambda = float(getattr(self.hparams, "model_cfg_sobolev_lambda", 0.1))
+        total_loss = loss_ade + loss_depth + loss_score + loss_rfs + (adv_lambda * loss_adv) + (sobolev_lambda * loss_sobolev)
         # TODO: improve logging both to disk and to console
         log_payload = {
             f"{stage}_loss_ade": loss_ade,
@@ -411,6 +440,8 @@ class LitModel(pl.LightningModule):
             f"{stage}_loss_depth": loss_depth,
             f"{stage}_loss_rfs": loss_rfs,
             f"{stage}_loss_adv": loss_adv,
+            f"{stage}_loss_sobolev": loss_sobolev,
+            f"{stage}_sobolev_grad_cosine": sobolev_grad_cosine,
             f"{stage}_rfs_unweighted": rfs_unweighted,
             f"{stage}_loss": total_loss,
         }

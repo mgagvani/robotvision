@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from math import sqrt
 from dataclasses import dataclass
 
 from .blocks import TransformerBlock
@@ -11,18 +10,23 @@ class DeepMonocularConfig:
     # arch
     n_blocks: int = 4
     n_proposals: int = 50
-    cam_idxs_used: list = (1,) # front only
+    cam_idxs_used: tuple = (1,) # front only
     # kinematics
     dt: float = 0.25
     max_accel: float = 8.0
     max_omega: float = 1.0
     # training
     use_depth_loss: bool = False
+    # --- PR #16 (Scorer as Optimization Target) ---
+    # https://github.com/mgagvani/robotvision/pull/16
     # adversarial training
-    adv_enabled: bool = True
+    adv_enabled: bool = False
     adv_lambda: float = 0.1
     adv_epsilon: float = 0.10
     adv_steps: int = 3
+    # sobolev training
+    sobolev_enabled: bool = True
+    sobolev_lambda: float = 50 # grad itself is around 0.02, so scale to 0.02 * 50 = 1.0
 
 class DeepMonocularModel(nn.Module):
     def __init__(
@@ -95,7 +99,7 @@ class DeepMonocularModel(nn.Module):
             nn.Linear(self.feature_dim, 1),
         ) # no softmax, since we use cross entropy later
 
-    def bicycle_model(self, control_pred: torch.Tensor, past: torch.Tensor) -> torch.Tensor:
+    def bicycle_model(self, control_pred: torch.Tensor, past: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         accel = torch.tanh(control_pred[..., 0]) * self.max_accel  # (B, K, T)
         omega = torch.tanh(control_pred[..., 1]) * self.max_omega  # (B, K, T)
 
@@ -117,6 +121,15 @@ class DeepMonocularModel(nn.Module):
 
         traj_xy = torch.stack(xy_steps, dim=2)  # (B, K, T, 2)
         return traj_xy, traj_xy.reshape(traj_xy.size(0), -1), accel, omega  # (B, K*T*2)
+
+    def score_trajectories(
+        self,
+        traj_flat: torch.Tensor,
+        query_for_score: torch.Tensor,
+    ) -> torch.Tensor:
+        traj_feat = self.traj_features(traj_flat)
+        score_in = torch.cat([query_for_score.to(dtype=traj_feat.dtype), traj_feat], dim=-1) # (B, K, C*2)
+        return self.score_decoder(score_in).squeeze(-1) # (B, K)
 
     def forward(self, x):
         # Copied from MonocularModel
@@ -161,10 +174,8 @@ class DeepMonocularModel(nn.Module):
         traj_xy, traj_pred, accel, omega = self.bicycle_model(control_pred, past)  # (B, K, T*2)
 
         traj_pred_flat = traj_xy.reshape(traj_xy.size(0), self.n_proposals, -1)  # (B, K, T*2)
-        traj_feat: torch.Tensor = self.traj_features(traj_pred_flat.detach())  # (B, K, C)
         query_for_score = query.squeeze(1).detach()[:, torch.newaxis, :].expand(-1, self.n_proposals, -1)  # (B, K, C)
-        score_in = torch.cat([query_for_score, traj_feat], dim=-1)  # (B, K, 2C)
-        score_pred = self.score_decoder(score_in).squeeze(-1)  # (B, K)
+        score_pred = self.score_trajectories(traj_pred_flat.detach(), query_for_score)  # (B, K)
 
         return {
             "trajectory": traj_pred,
