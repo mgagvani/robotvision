@@ -48,7 +48,7 @@ class MonocularModel(nn.Module):
 
     def forward(self, x: dict) -> torch.Tensor:
         # past: (B, 16, 6), intent: int
-        past, images, intent = x['PAST'], x['IMAGES'], x['INTENT']
+        past, images, intent = x['PAST'], x['IMAGES_JPEG'], x['INTENT']
         
         # Ref: https://github.com/waymo-research/waymo-open-dataset/blob/5f8a1cd42491210e7de629b6f8fc09b65e0cbe99/src/waymo_open_dataset/dataset.proto#L50%20%20order%20=%20[2,%201,%203]
         front_cam = images[1]
@@ -175,11 +175,11 @@ class DeepMonocularModel(nn.Module):
         traj_xy = torch.stack(xy_steps, dim=2)  # (B, K, T, 2)
         return traj_xy, traj_xy.reshape(traj_xy.size(0), -1), accel, omega  # (B, K*T*2)
 
-    def forward(self, x):
+    def forward(self, x, sae=None):
         # Copied from MonocularModel
         # past: (B, 16, 6), intent: int
         past, images, intent = x['PAST'], x['IMAGES'], x['INTENT']
-        
+
         # Ref: https://github.com/waymo-research/waymo-open-dataset/blob/5f8a1cd42491210e7de629b6f8fc09b65e0cbe99/src/waymo_open_dataset/dataset.proto#L50%20%20order%20=%20[2,%201,%203]
         front_cam = images[1]
 
@@ -210,6 +210,10 @@ class DeepMonocularModel(nn.Module):
         for block in self.blocks:
             query = block(query, tokens)
 
+        if sae is not None:
+            sae_out = sae(query.squeeze(1))
+            query = sae_out["reconstruction"].unsqueeze(1)
+
         # predict (acceleration, angular velocity) for each timestep
         # and roll it out using the kinematic bicycle model
         control_pred = self.traj_decoder(query.squeeze(1)).view(
@@ -228,4 +232,5 @@ class DeepMonocularModel(nn.Module):
             "scores": score_pred,
             "depth": output_depth,
             "controls": torch.stack([accel, omega], dim=-1).reshape(query.size(0), -1),
+            "query": query
         }
