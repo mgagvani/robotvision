@@ -190,10 +190,10 @@ if __name__ == "__main__":
         from loader import WaymoE2E
 
         train_dataset = WaymoE2E(
-            indexFile="index_train.pkl", data_dir=args.data_dir, n_items=250_000
+            indexFile="index_train.pkl", data_dir=args.data_dir, n_items=25_000
         )
         test_dataset = WaymoE2E(
-            indexFile="index_val.pkl", data_dir=args.data_dir, n_items=25_000
+            indexFile="index_val.pkl", data_dir=args.data_dir, n_items=2_500
         )
         nw = 0
     elif args.dataset == "nuscenes":
@@ -313,20 +313,20 @@ if __name__ == "__main__":
     # We don't want to save logs or checkpoints in the home directory - it'll fill up fast
     base_path = Path(args.data_dir).parent.as_posix()
     timestamp = f"{name}_e2e_{args.dataset}_{datetime.now().strftime('%Y%m%d_%H%M')}"
-    wandb_logger = WandbLogger(
-        name=timestamp,
-        save_dir=base_path + "/logs",
-        project="robotvision",
-        log_model=True,
-    )
-    wandb_logger.watch(lit_model, log="all")
+    #wandb_logger = WandbLogger(
+    #    name=timestamp,
+    #    save_dir=base_path + "/logs",
+    #    project="robotvision",
+    #    log_model=True,
+    #)
+    #wandb_logger.watch(lit_model, log="all")
 
     strategy = "ddp" if torch.cuda.device_count() > 1 else "auto"
     use_distributed_sampler = args.dataset != "all"
     torch.set_float32_matmul_precision("medium")
     trainer = pl.Trainer(
         max_epochs=args.max_epochs,
-        logger=[CSVLogger(base_path + "/logs", name=timestamp), wandb_logger],
+        #logger=[CSVLogger(base_path + "/logs", name=timestamp), wandb_logger],
         strategy=strategy,
         use_distributed_sampler=use_distributed_sampler,
         precision="bf16-mixed" if torch.cuda.is_bf16_supported() else 16,

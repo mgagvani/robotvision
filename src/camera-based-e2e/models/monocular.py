@@ -228,4 +228,5 @@ class DeepMonocularModel(nn.Module):
             "scores": score_pred,
             "depth": output_depth,
             "controls": torch.stack([accel, omega], dim=-1).reshape(query.size(0), -1),
+            "planner_query_tok": query.squeeze(1), # extract planner query token for interpretability analysis
         }
