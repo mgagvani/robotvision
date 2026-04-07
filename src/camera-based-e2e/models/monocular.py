@@ -26,7 +26,7 @@ class DeepMonocularConfig:
     adv_steps: int = 3
     # sobolev training
     sobolev_enabled: bool = True
-    sobolev_lambda: float = 50 # grad itself is around 0.02, so scale to 0.02 * 50 = 1.0
+    sobolev_lambda: float = 500 # scale up loss further
 
 class DeepMonocularModel(nn.Module):
     def __init__(
@@ -57,7 +57,10 @@ class DeepMonocularModel(nn.Module):
         )
 
         # learnable positional encoding
-        self.n_tokens = self.features.data_config["input_size"][1] // self.features.patch_size * (self.features.data_config["input_size"][2] // self.features.patch_size)
+        if hasattr(self.features, "n_tokens"):
+            self.n_tokens = self.features.n_tokens
+        else:
+            self.n_tokens = self.features.data_config["input_size"][1] // self.features.patch_size * (self.features.data_config["input_size"][2] // self.features.patch_size)
         self.positional_encoding = nn.Parameter(nn.init.trunc_normal_(torch.zeros((1, self.n_tokens, self.feature_dim)), std=0.02)) # (1, N, C)
         
         # Deep network rather than single attention in MonocularModel 
@@ -99,19 +102,29 @@ class DeepMonocularModel(nn.Module):
             nn.Linear(self.feature_dim, 1),
         ) # no softmax, since we use cross entropy later
 
-    def bicycle_model(self, control_pred: torch.Tensor, past: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        accel = torch.tanh(control_pred[..., 0]) * self.max_accel  # (B, K, T)
-        omega = torch.tanh(control_pred[..., 1]) * self.max_omega  # (B, K, T)
+    def rollout_controls(
+        self,
+        controls: torch.Tensor,
+        past: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if controls.ndim != 4 or controls.size(-1) != 2:
+            raise ValueError(
+                f"controls must have shape (B, K, T, 2), got {tuple(controls.shape)}"
+            )
 
-        x_state = past[:, -1, 0].unsqueeze(1).expand(-1, self.n_proposals).clone()
-        y_state = past[:, -1, 1].unsqueeze(1).expand(-1, self.n_proposals).clone()
+        batch_size, n_proposals, horizon, _ = controls.shape
+        accel = controls[..., 0]
+        omega = controls[..., 1]
+
+        x_state = past[:, -1, 0].unsqueeze(1).expand(-1, n_proposals).clone()
+        y_state = past[:, -1, 1].unsqueeze(1).expand(-1, n_proposals).clone()
         vx0 = past[:, -1, 2]
         vy0 = past[:, -1, 3]
-        speed_state = torch.sqrt(vx0 * vx0 + vy0 * vy0 + 1e-6).unsqueeze(1).expand(-1, self.n_proposals).clone()
-        heading_state = torch.atan2(vy0, vx0).unsqueeze(1).expand(-1, self.n_proposals).clone()
+        speed_state = torch.sqrt(vx0 * vx0 + vy0 * vy0 + 1e-6).unsqueeze(1).expand(-1, n_proposals).clone()
+        heading_state = torch.atan2(vy0, vx0).unsqueeze(1).expand(-1, n_proposals).clone()
 
         xy_steps = []
-        for t in range(self.horizon):
+        for t in range(horizon):
             x_state = x_state + speed_state * torch.cos(heading_state) * self.dt
             y_state = y_state + speed_state * torch.sin(heading_state) * self.dt
             xy_steps.append(torch.stack([x_state, y_state], dim=-1))
@@ -120,7 +133,18 @@ class DeepMonocularModel(nn.Module):
             speed_state = torch.clamp_min(speed_state + accel[:, :, t] * self.dt, 0.0)
 
         traj_xy = torch.stack(xy_steps, dim=2)  # (B, K, T, 2)
-        return traj_xy, traj_xy.reshape(traj_xy.size(0), -1), accel, omega  # (B, K*T*2)
+        return traj_xy, traj_xy.reshape(batch_size, n_proposals, -1)
+
+    def bicycle_model(
+        self,
+        control_pred: torch.Tensor,
+        past: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        accel = torch.tanh(control_pred[..., 0]) * self.max_accel  # (B, K, T)
+        omega = torch.tanh(control_pred[..., 1]) * self.max_omega  # (B, K, T)
+        controls = torch.stack([accel, omega], dim=-1)
+        traj_xy, traj_flat = self.rollout_controls(controls, past)
+        return traj_xy, traj_flat, accel, omega
 
     def score_trajectories(
         self,
@@ -171,17 +195,18 @@ class DeepMonocularModel(nn.Module):
         control_pred = self.traj_decoder(query.squeeze(1)).view(
             query.size(0), self.n_proposals, self.horizon, 2
         )  # (B, K, T, 2)
-        traj_xy, traj_pred, accel, omega = self.bicycle_model(control_pred, past)  # (B, K, T*2)
+        traj_xy, traj_pred_flat, accel, omega = self.bicycle_model(control_pred, past)  # (B, K, T*2)
 
-        traj_pred_flat = traj_xy.reshape(traj_xy.size(0), self.n_proposals, -1)  # (B, K, T*2)
         query_for_score = query.squeeze(1).detach()[:, torch.newaxis, :].expand(-1, self.n_proposals, -1)  # (B, K, C)
         score_pred = self.score_trajectories(traj_pred_flat.detach(), query_for_score)  # (B, K)
+        controls_structured = torch.stack([accel, omega], dim=-1)
 
         return {
-            "trajectory": traj_pred,
+            "trajectory": traj_pred_flat.reshape(traj_pred_flat.size(0), -1),
             "trajectory_flat": traj_pred_flat,
             "query_for_score": query_for_score,
             "scores": score_pred,
             "depth": output_depth,
-            "controls": torch.stack([accel, omega], dim=-1).reshape(query.size(0), -1),
+            "controls": controls_structured.reshape(query.size(0), -1),
+            "controls_structured": controls_structured,
         }
