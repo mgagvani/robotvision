@@ -83,29 +83,96 @@ class LitModel(pl.LightningModule):
         device: torch.device | None = None,
     ) -> list[torch.Tensor]:
         decode_device = self.device if device is None else device
-        # Flatten cameras
-        flat_encoded, cam_sizes = [], []
-        for cam in images_jpeg:
-            cam_sizes.append(len(cam))
-            for jpg in cam:
-                t = jpg if isinstance(jpg, torch.Tensor) else torch.frombuffer(memoryview(jpg), dtype=torch.uint8)
-                # decode_jpeg requires the raw jpeg bytes to be on cpu
+
+        # Normalize input shapes:
+        # Accept either a batch-style `list[list[tensor]]` (one inner list per sample)
+        # Or a single-sample `list[tensor]` (one list of JPEG tensors)
+        if not isinstance(images_jpeg, (list, tuple)):
+            raise TypeError("images_jpeg must be a list of lists or a list of tensors")
+
+        # If outer list contains tensors directly, treat as batch size 1
+        if len(images_jpeg) > 0 and isinstance(images_jpeg[0], torch.Tensor):
+            images_jpeg = [images_jpeg]
+
+        batch_size = len(images_jpeg)
+        if batch_size == 0:
+            raise RuntimeError("Empty batch provided to decode_batch_jpeg")
+
+        # Determine number of cameras from first sample (assume consistent ordering)
+        num_cams = max((len(cam_list) if cam_list is not None else 0) for cam_list in images_jpeg)
+        if num_cams == 0:
+            raise RuntimeError("No camera images found in images_jpeg")
+
+        # Build flat list to decode, and keep metadata to place decoded tensors
+        flat_encoded = []
+        meta = []  # list of (sample_idx, cam_idx)
+        for s_idx, cam_list in enumerate(images_jpeg):
+            if cam_list is None:
+                continue
+            for c_idx, jpg in enumerate(cam_list):
+                try:
+                    t = jpg if isinstance(jpg, torch.Tensor) else torch.frombuffer(memoryview(jpg), dtype=torch.uint8)
+                except Exception:
+                    continue
+                if not isinstance(t, torch.Tensor) or t.dim() != 1 or t.numel() == 0:
+                    continue
                 if t.device.type != "cpu":
                     t = t.cpu()
                 flat_encoded.append(t)
-        
+                meta.append((s_idx, c_idx))
+
+        if len(flat_encoded) == 0:
+            raise RuntimeError("No valid JPEG tensors found in images_jpeg; cannot decode.")
+
         flat_decoded = torchvision.io.decode_jpeg(
-            flat_encoded, 
+            flat_encoded,
             mode=torchvision.io.ImageReadMode.UNCHANGED,
             device=decode_device,
-        ) # list of (C, H, W) gpu tensors
+        )  # list of (C, H, W) tensors in same order as flat_encoded
+
+        # Initialize per-camera lists with placeholders
+        per_cam = [[None] * batch_size for _ in range(num_cams)]
+        for dec, (s_idx, c_idx) in zip(flat_decoded, meta):
+            # normalize channels
+            c = dec.shape[0]
+            if c == 1:
+                dec = dec.repeat(3, 1, 1)
+            elif c >= 4:
+                dec = dec[:3]
+            # move to decode device
+            if dec.device != decode_device:
+                dec = dec.to(decode_device)
+            per_cam[c_idx][s_idx] = dec
 
         out = []
-        idx = 0
-        for n in cam_sizes:
-            cam_list = flat_decoded[idx: idx+n]
-            idx += n
-            out.append(torch.stack(cam_list, dim=0))  # (B, C, H, W)
+        for c_idx in range(num_cams):
+            cam_list = per_cam[c_idx]
+            # replace missing entries with zero tensors matching the largest H,W for this camera
+            valid = [t for t in cam_list if t is not None]
+            if len(valid) == 0:
+                out.append(torch.empty((0, 3, 0, 0), device=decode_device))
+                continue
+
+            max_h = max(t.shape[1] for t in valid)
+            max_w = max(t.shape[2] for t in valid)
+
+            padded = []
+            for t in cam_list:
+                if t is None:
+                    # create zero image
+                    padded.append(torch.zeros((3, max_h, max_w), device=decode_device))
+                    continue
+                _, h, w = t.shape
+                pad_h = max_h - h
+                pad_w = max_w - w
+                if pad_h == 0 and pad_w == 0:
+                    padded.append(t)
+                else:
+                    pad = (0, pad_w, 0, pad_h)
+                    padded.append(torch.nn.functional.pad(t, pad, mode="constant", value=0))
+
+            out.append(torch.stack(padded, dim=0))  # (B, C, H, W)
+
         return out
 
     def on_fit_start(self) -> None:

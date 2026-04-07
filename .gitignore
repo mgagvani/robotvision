@@ -6,6 +6,8 @@
 **.out
 **.err
 **/exp/**
+viz_perception
+*.npy
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
