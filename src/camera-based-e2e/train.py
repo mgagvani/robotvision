@@ -21,7 +21,7 @@ from torch.utils.data import BatchSampler
 # Replace with your model defined in models/
 from models.base_model import LitModel, collate_with_images
 from models.monocular import DeepMonocularModel
-from models.feature_extractors import SAMFeatures
+from models.feature_extractors import SAMFeatures, EUPEFeatures
 
 
 class HomogeneousConcatBatchSampler(BatchSampler):
@@ -299,8 +299,11 @@ if __name__ == "__main__":
     out_dim = 20 * 2  # Future: (B, 20, 2)
 
     model = DeepMonocularModel(
-        feature_extractor=SAMFeatures(
-            model_name="timm/vit_pe_spatial_small_patch16_512.fb", frozen=True
+        # feature_extractor=EUPEFeatures(
+        #     model_name="EUPE-ViT-S", frozen=True
+        # ),
+        feature_extractor=EUPEFeatures(
+            model_name="EUPE-ViT-S", frozen=True
         ),
         out_dim=out_dim,
     )
