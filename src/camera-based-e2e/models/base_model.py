@@ -398,54 +398,6 @@ class LitModel(pl.LightningModule):
                     dim=-1,
                 ).mean()
 
-        loss_local_step = torch.tensor(0.0, device=self.device)
-        local_step_rel_improve = torch.tensor(0.0, device=self.device)
-        local_step_enabled = bool(getattr(self.hparams, "model_cfg_local_step_enabled", False))
-        if (stage == "train" and local_step_enabled and k_modes > 1 and pred_scores is not None and pred_traj_flat is not None and query_for_score is not None and hasattr(self.model, "score_trajectories")):
-            local_step_alpha = float(getattr(self.hparams, "model_cfg_local_step_alpha", 0.02))
-            autocast_device = pred_traj_flat.device.type
-            autocast_ctx = (
-                torch.autocast(device_type=autocast_device, enabled=False)
-                if autocast_device in ("cpu", "cuda")
-                else nullcontext()
-            )
-            with autocast_ctx:
-                sample_idx = torch.arange(pred.size(0), device=pred.device)
-                scorer_pick = pred_scores.argmin(dim=1)
-                # tau0 - best trajectory according to scorer
-                tau0 = pred_traj_flat.detach()[sample_idx, scorer_pick].float().requires_grad_(True)
-                query0 = query_for_score.detach()[sample_idx, scorer_pick].float()
-                score0 = self.model.score_trajectories(
-                    tau0.unsqueeze(1),
-                    query0.unsqueeze(1),
-                ).squeeze(1)
-                # d(score0)/d(tau0)
-                grad_tau0 = torch.autograd.grad(
-                    score0.sum(),
-                    tau0,
-                    create_graph=True,
-                    only_inputs=True,
-                )[0]
-                # normalize grad_tau0 to have norm 1. to ensure we are taking a unit vector step.
-                grad_tau0 = grad_tau0 / grad_tau0.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-                # tau1 = tau0 - alpha * grad_tau0 (gradient descent step to minimize score)
-                tau1 = tau0 - (local_step_alpha * grad_tau0)
-
-                ade0 = torch.norm(
-                    tau0.view(pred.size(0), t_steps, 2) - future.float(),
-                    dim=-1,
-                ).mean(dim=-1)
-                ade1 = torch.norm(
-                    tau1.view(pred.size(0), t_steps, 2) - future.float(),
-                    dim=-1,
-                ).mean(dim=-1)
-                # loss_local_step should be as negative (small) as possible
-                loss_local_step = (ade1 - ade0.detach()).mean()
-                # normalized ADE improvement
-                local_step_rel_improve = (
-                    (ade0.detach() - ade1.detach()) / ade0.detach().clamp_min(1e-3)
-                ).mean()
-
         # Scorer Metrics
         scorer_metrics = {}
         if k_modes > 1 and pred_scores is not None:

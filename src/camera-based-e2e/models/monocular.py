@@ -26,7 +26,7 @@ class DeepMonocularConfig:
     adv_steps: int = 3
     # sobolev training
     sobolev_enabled: bool = True
-    sobolev_lambda: float = 500 # scale up loss further
+    sobolev_lambda: float = 50 # scale up loss further
 
 class DeepMonocularModel(nn.Module):
     def __init__(
