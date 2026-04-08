@@ -16,7 +16,7 @@ class DINOFeatures(nn.Module):
             for param in self.dino_model.parameters():
                 param.requires_grad = False
 
-        self.dims = [384, 384, 384]  # feature dims for each layer
+        self.dims = [384]  # feature dims for last layer
         self.patch_size = 16  # patch size
 
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
@@ -24,7 +24,7 @@ class DINOFeatures(nn.Module):
         # transforms: resize 256x256, center crop, normalize
         x_t = self.transforms(x.float().div(255.0)) # preprocess
         features = self.dino_model(x_t)
-        return features # 3 x [B, 384, 16, 16]
+        return features[-1:] # return last layer features as list of 1 tensor (B, C, H', W')
     
 class SAMFeatures(nn.Module):
     def __init__(
