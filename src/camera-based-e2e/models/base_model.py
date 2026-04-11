@@ -451,8 +451,6 @@ class LitModel(pl.LightningModule):
             f"{stage}_loss_adv": loss_adv,
             f"{stage}_loss_sobolev": loss_sobolev,
             f"{stage}_sobolev_grad_cosine": sobolev_grad_cosine,
-            f"{stage}_loss_local_step": loss_local_step,
-            f"{stage}_local_step_rel_improve": local_step_rel_improve,
             f"{stage}_rfs_unweighted": rfs_unweighted,
             f"{stage}_loss": total_loss,
         }

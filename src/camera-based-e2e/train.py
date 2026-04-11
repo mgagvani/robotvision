@@ -21,7 +21,7 @@ from torch.utils.data import BatchSampler
 # Replace with your model defined in models/
 from models.base_model import LitModel, collate_with_images
 from models.monocular import DeepMonocularModel
-from models.feature_extractors import SAMFeatures, EUPEFeatures
+from models.feature_extractors import *
 
 
 class HomogeneousConcatBatchSampler(BatchSampler):
@@ -298,18 +298,21 @@ if __name__ == "__main__":
     in_dim = 16 * 6  # Past: (B, 16, 6)
     out_dim = 20 * 2  # Future: (B, 20, 2)
 
-    model = DeepMonocularModel(
+    model: torch.nn.Module = DeepMonocularModel(
+        feature_extractor=DINOFeatures(
+            model_name="vit_small_plus_patch16_dinov3.lvd1689m", frozen=True
+        ),
+        # feature_extractor=SAMFeatures(
+        #     model_name="timm/vit_pe_spatial_small_patch16_512.fb", frozen=True, feature_stage=-1
+        # ),
         # feature_extractor=EUPEFeatures(
         #     model_name="EUPE-ViT-S", frozen=True
         # ),
-        feature_extractor=EUPEFeatures(
-            model_name="EUPE-ViT-S", frozen=True
-        ),
         out_dim=out_dim,
     )
     name = str(model.__class__.__name__.replace("Model", "")).lower()
     if args.compile:
-        model = torch.compile(model, mode="max-autotune")
+        model: torch.nn.Module = torch.compile(model, mode="max-autotune")
     lit_model = LitModel(model=model, lr=args.lr)
 
     # We don't want to save logs or checkpoints in the home directory - it'll fill up fast
