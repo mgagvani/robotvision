@@ -199,6 +199,37 @@ class DeepMonocularModel(nn.Module):
         traj_xy = torch.stack(xy_steps, dim=2)  # (B, K, T, 2)
         return traj_xy, traj_xy.reshape(traj_xy.size(0), -1), accel, omega  # (B, K*T*2)
 
+    def forward_from_planner_query_tok(
+        self,
+        planner_query_tok: torch.Tensor,
+        past: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        query = planner_query_tok
+        if query.ndim == 3:
+            if query.size(1) != 1:
+                raise ValueError(f"Expected query shape (B, 1, C), got {query.shape}")
+            query = query.squeeze(1)
+        elif query.ndim != 2:
+            raise ValueError(f"Expected query shape (B, C) or (B, 1, C), got {query.shape}")
+
+        control_pred = self.traj_decoder(query).view(
+            query.size(0), self.n_proposals, self.horizon, 2
+        )  # (B, K, T, 2)
+        traj_xy, traj_pred, accel, omega = self.bicycle_model(control_pred, past)  # (B, K, T*2)
+
+        traj_pred_flat = traj_xy.reshape(traj_xy.size(0), self.n_proposals, -1)  # (B, K, T*2)
+        traj_feat: torch.Tensor = self.traj_features(traj_pred_flat.detach())  # (B, K, C)
+        query_for_score = query.detach()[:, torch.newaxis, :].expand(-1, self.n_proposals, -1)  # (B, K, C)
+        score_in = torch.cat([query_for_score, traj_feat], dim=-1)  # (B, K, 2C)
+        score_pred = self.score_decoder(score_in).squeeze(-1)  # (B, K)
+
+        return {
+            "trajectory": traj_pred,
+            "scores": score_pred,
+            "controls": torch.stack([accel, omega], dim=-1).reshape(query.size(0), -1),
+            "planner_query_tok": query,
+        }
+
     def forward(self, x):
         # Copied from MonocularModel
         # past: (B, 16, 6), intent: int
@@ -233,24 +264,6 @@ class DeepMonocularModel(nn.Module):
 
         for block in self.blocks:
             query = block(query, tokens)
-
-        # predict (acceleration, angular velocity) for each timestep
-        # and roll it out using the kinematic bicycle model
-        control_pred = self.traj_decoder(query.squeeze(1)).view(
-            query.size(0), self.n_proposals, self.horizon, 2
-        )  # (B, K, T, 2)
-        traj_xy, traj_pred, accel, omega = self.bicycle_model(control_pred, past)  # (B, K, T*2)
-
-        traj_pred_flat = traj_xy.reshape(traj_xy.size(0), self.n_proposals, -1)  # (B, K, T*2)
-        traj_feat: torch.Tensor = self.traj_features(traj_pred_flat.detach())  # (B, K, C)
-        query_for_score = query.squeeze(1).detach()[:, torch.newaxis, :].expand(-1, self.n_proposals, -1)  # (B, K, C)
-        score_in = torch.cat([query_for_score, traj_feat], dim=-1)  # (B, K, 2C)
-        score_pred = self.score_decoder(score_in).squeeze(-1)  # (B, K)
-
-        return {
-            "trajectory": traj_pred,
-            "scores": score_pred,
-            "depth": output_depth,
-            "controls": torch.stack([accel, omega], dim=-1).reshape(query.size(0), -1),
-            "planner_query_tok": query.squeeze(1), # extract planner query token for interpretability analysis
-        }
+        out = self.forward_from_planner_query_tok(query, past)
+        out["depth"] = output_depth
+        return out
