@@ -1,9 +1,14 @@
+""" Sparse Autoencoder and training loop"""
+
 import argparse
 
 import pytorch_lightning as pl
 from models.base_model import LitModel, collate_with_images
 import torch
 import torch.nn.functional as F
+from datetime import datetime
+from pathlib import Path
+from pytorch_lightning.loggers import WandbLogger, CSVLogger
 
 from models.monocular import DeepMonocularModel
 from models.feature_extractors import SAMFeatures
@@ -11,7 +16,7 @@ from models.feature_extractors import SAMFeatures
 from loader import WaymoE2E
 
 class SparseAE(pl.LightningModule):
-    def __init__(self, target_model, input_dim, dict_size, l1_coeff=1e-3, compile_sae=False):
+    def __init__(self, target_model, input_dim, dict_size, l1_coeff=1e-3, compile_sae=True):
         super().__init__()
         self.target_model = target_model
         
@@ -28,10 +33,51 @@ class SparseAE(pl.LightningModule):
         
         self.internal_acts = None
 
-        if self.compile_sae and hasattr(torch, "compile"):
-            # Compile only the trainable SAE path; keep the hooked target model untouched.
+        if self.compile_sae:
             self.encoder = torch.compile(self.encoder, mode="max-autotune")
             self.decoder = torch.compile(self.decoder, mode="max-autotune")
+
+    def _state_dict_uses_compiled_keys(self, state_dict):
+        return any("._orig_mod." in key for key in state_dict)
+
+    def _module_uses_compiled_keys(self):
+        module_state = super().state_dict()
+        return any("._orig_mod." in key for key in module_state)
+
+    def _normalize_state_dict_for_current_modules(self, state_dict):
+        state_uses_compiled_keys = self._state_dict_uses_compiled_keys(state_dict)
+        module_uses_compiled_keys = self._module_uses_compiled_keys()
+        if state_uses_compiled_keys == module_uses_compiled_keys:
+            return state_dict
+
+        normalized = {}
+        for key, value in state_dict.items():
+            if module_uses_compiled_keys:
+                if key.startswith("encoder."):
+                    key = key.replace("encoder.", "encoder._orig_mod.", 1)
+                elif key.startswith("decoder."):
+                    key = key.replace("decoder.", "decoder._orig_mod.", 1)
+            else:
+                key = key.replace("encoder._orig_mod.", "encoder.", 1)
+                key = key.replace("decoder._orig_mod.", "decoder.", 1)
+            normalized[key] = value
+        return normalized
+
+    def load_state_dict(self, state_dict, strict=True):
+        state_dict = self._normalize_state_dict_for_current_modules(state_dict)
+        return super().load_state_dict(state_dict, strict=strict)
+
+    @classmethod
+    def build_from_state_dict(cls, state_dict, target_model, input_dim, dict_size, l1_coeff=1e-3, compile_sae=False):
+        sae = cls(
+            target_model=target_model,
+            input_dim=input_dim,
+            dict_size=dict_size,
+            l1_coeff=l1_coeff,
+            compile_sae=compile_sae,
+        )
+        sae.load_state_dict(state_dict, strict=True)
+        return sae
 
     def hook_fn(self, module, input, output):
         # Store activations from the base model
@@ -125,11 +171,12 @@ class SparseAE(pl.LightningModule):
         return torch.optim.Adam(params, lr=1e-4)
 
 if __name__ == "__main__":
+    torch.set_float32_matmul_precision('high')
     parser = argparse.ArgumentParser()
     parser.add_argument("--compile", action="store_true", help="Compile the SAE encoder/decoder with torch.compile")
     parser.add_argument("--max_epochs", type=int, default=1, help="Number of SAE epochs")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for SAE training")
-    parser.add_argument("--num_workers", type=int, default=2, help="Number of DataLoader workers")
+    parser.add_argument("--num_workers", type=int, default=14, help="Number of DataLoader workers")
     parser.add_argument(
         "--checkpoint_path",
         type=str,
@@ -139,7 +186,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--data_dir",
         type=str,
-        default="/scratch/gilbreth/bnamikas/data/waymo_open_dataset_end_to_end_camera_v_1_0_0/",
+        default="/scratch/gautschi/bnamikas/data/waymo_open_dataset_end_to_end_camera_v_1_0_0/",
         help="Waymo dataset directory",
     )
     args = parser.parse_args()
@@ -163,10 +210,11 @@ if __name__ == "__main__":
         dict_size=4096,
         compile_sae=args.compile,
     )
+
     target_layer.register_forward_hook(sae.hook_fn)
 
     waymo_train = WaymoE2E(
-            indexFile="index_train.pkl", data_dir=args.data_dir, n_items=80_000
+            indexFile="index_train.pkl", data_dir=args.data_dir, n_items=250_000
         )
     from torch.utils.data import DataLoader
 
@@ -179,6 +227,18 @@ if __name__ == "__main__":
         pin_memory=False,
     )
 
-    trainer = pl.Trainer(max_epochs=args.max_epochs)
+    name="sparseAE"
+    base_path = Path(args.data_dir).parent.as_posix()
+    timestamp = f"{name}_e2e_{args.dataset}_{datetime.now().strftime('%Y%m%d_%H%M')}"
+    wandb_logger = WandbLogger(
+        name=timestamp,
+        save_dir=base_path + "/logs",
+        project="robotvision",
+        log_model=True,
+    )
+
+    wandb_logger.watch(sae, log="all")
+
+    trainer = pl.Trainer(max_epochs=args.max_epochs, logger=[CSVLogger(base_path + "/logs", name=timestamp), wandb_logger],)
 
     trainer.fit(sae, train_dataloaders=train_loader)

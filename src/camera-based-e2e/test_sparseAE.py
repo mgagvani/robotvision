@@ -1,3 +1,8 @@
+"""
+Evaluate SAE reconstruction quality and trajectory impact when patching the target layer.
+"""
+
+
 import argparse
 from contextlib import contextmanager
 
@@ -61,10 +66,10 @@ def patched_layer_with_sae(target_layer, sae, stats):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_checkpoint_path", type=str, required=True, help="Frozen target-model checkpoint")
+    parser.add_argument("--model_checkpoint_path", default="./pretrained/camera-e2e-epoch=04-val_loss=2.90.ckpt", type=str, help="Frozen target-model checkpoint")
     parser.add_argument("--sae_checkpoint_path", type=str, required=True, help="Trained SparseAE checkpoint")
     parser.add_argument("--data_dir", type=str, required=True, help="Waymo dataset directory")
-    parser.add_argument("--split", type=str, default="val", choices=["train", "val"], help="Dataset split to evaluate")
+    parser.add_argument("--split", type=str, default="train", choices=["train", "val"], help="Dataset split to evaluate")
     parser.add_argument("--n_items", type=int, default=50_000, help="Number of examples to evaluate")
     parser.add_argument("--batch_size", type=int, default=16, help="Evaluation batch size")
     parser.add_argument("--num_workers", type=int, default=8, help="DataLoader workers")
@@ -95,11 +100,13 @@ def main():
     encoder_weight = sae_state["encoder.weight"]
     dict_size, input_dim = encoder_weight.shape
 
-    sae = SparseAE.load_from_checkpoint(args.sae_checkpoint_path, target_model=model, input_dim=input_dim, dict_size=dict_size, compile_sae=False)
-    # sae.load_state_dict(
-    #     {k: v for k, v in sae_state.items() if k.startswith("encoder.") or k.startswith("decoder.")},
-    #     strict=True,
-    # )
+    sae = SparseAE.build_from_state_dict(
+        sae_state,
+        target_model=model,
+        input_dim=input_dim,
+        dict_size=dict_size,
+        compile_sae=False,
+    )
     sae = sae.to(device)
     sae.eval()
 

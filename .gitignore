@@ -9,11 +9,13 @@
 viz_perception
 *.npy
 *.ckpt
+*.sbatch
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
 *$py.class
+
 
 # env setup script
 setup.sh

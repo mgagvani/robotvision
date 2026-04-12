@@ -6,6 +6,7 @@ import os
 import numpy as np
 from typing import Optional
 import random
+import warnings
 
 devices = ['cuda:0', 'cuda:1']
 
@@ -30,6 +31,30 @@ class WaymoE2E(Dataset):
             # We train on train and validate on val set
             self.indexes = pickle.load(f)
 
+        # Drop index entries whose backing shard is missing so the dataloader
+        # can keep iterating even when the dataset is incomplete.
+        available_indexes = []
+        missing_files = set()
+        for entry in self.indexes:
+            filename, _, _ = entry
+            if os.path.exists(os.path.join(self.data_dir, filename)):
+                available_indexes.append(entry)
+            else:
+                missing_files.add(filename)
+
+        if missing_files:
+            warnings.warn(
+                f"Skipping {len(missing_files)} missing data file(s) referenced by "
+                f"{indexFile}: {sorted(missing_files)[:5]}"
+                + (" ..." if len(missing_files) > 5 else ""),
+                stacklevel=2,
+            )
+            self.indexes = available_indexes
+            if not self.indexes:
+                raise FileNotFoundError(
+                    f"No indexed data files were found under {self.data_dir}"
+                )
+
         # TODO: Determine how to sample specific subsets of the data that we care about.
         if n_items is not None and n_items < len(self.indexes):
             total = len(self.indexes)
@@ -44,12 +69,15 @@ class WaymoE2E(Dataset):
     def __getitem__(self, idx):
         frame = e2e_pb2.E2EDFrame()  # type: ignore
         filename, start_byte, byte_length = self.indexes[idx]
+        file_path = os.path.join(self.data_dir, filename)
 
         if self.filename != filename:
             if self.file:
                 self.file.close()
                 del self.file
-            self.file = open(os.path.join(self.data_dir, filename), 'rb')
+            if not os.path.exists(file_path):
+                return self.__getitem__((idx + 1) % len(self.indexes))
+            self.file = open(file_path, 'rb')
             self.filename = filename
 
         self.file.seek(start_byte) # type: ignore
