@@ -100,6 +100,61 @@ def compute_hidden_activations(sae: SparseAE, hooked_acts: torch.Tensor) -> torc
     return hidden.reshape(hidden.size(0), -1)
 
 
+def future_tail_speed(
+    past: torch.Tensor,
+    future: torch.Tensor,
+    dt: float,
+    tail_steps: int,
+) -> float:
+    if future.ndim != 2 or future.size(-1) != 2:
+        raise ValueError(f"Expected future shape (T, 2), got {tuple(future.shape)}")
+
+    if tail_steps <= 0:
+        raise ValueError(f"tail_steps must be > 0, got {tail_steps}")
+
+    prev = torch.cat([past[-1:, :2], future[:-1]], dim=0)
+    step_speeds = torch.norm(future - prev, dim=-1) / dt
+    tail = step_speeds[-min(tail_steps, step_speeds.numel()) :]
+    return float(tail.mean().item())
+
+
+def past_current_speed(past: torch.Tensor) -> float:
+    if past.ndim != 2 or past.size(-1) < 4:
+        raise ValueError(f"Expected past shape (T, >=4), got {tuple(past.shape)}")
+    return float(torch.norm(past[-1, 2:4], dim=-1).item())
+
+
+def classify_sample(
+    *,
+    has_object: bool,
+    past: torch.Tensor,
+    future: torch.Tensor,
+    label_mode: str,
+    dt: float,
+    tail_steps: int,
+    moving_speed_thresh: float,
+    stop_speed_thresh: float,
+) -> Optional[bool]:
+    if label_mode == "object_presence":
+        return has_object
+
+    if not has_object:
+        return None
+
+    current_speed = past_current_speed(past)
+    tail_speed = future_tail_speed(past, future, dt=dt, tail_steps=tail_steps)
+
+    if current_speed < moving_speed_thresh:
+        return None
+
+    if label_mode == "stop_with_object":
+        return tail_speed <= stop_speed_thresh
+    if label_mode == "move_with_object":
+        return tail_speed > stop_speed_thresh
+
+    raise ValueError(f"Unsupported label_mode: {label_mode}")
+
+
 def summarize_features(
     positive_sum: torch.Tensor,
     negative_sum: torch.Tensor,
@@ -161,6 +216,37 @@ def main():
     parser.add_argument("--camera_indices", type=str, default="1", help="Comma-separated camera subset to score")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--top_k", type=int, default=25)
+    parser.add_argument(
+        "--label_mode",
+        type=str,
+        default="object_presence",
+        choices=["object_presence", "stop_with_object", "move_with_object"],
+        help=(
+            "How to build positive/negative sets. "
+            "'object_presence' compares object vs non-object frames. "
+            "'stop_with_object' compares stopping vs non-stopping samples within object-present frames. "
+            "'move_with_object' flips that polarity."
+        ),
+    )
+    parser.add_argument("--dt", type=float, default=0.25, help="Trajectory step size in seconds")
+    parser.add_argument(
+        "--tail_steps",
+        type=int,
+        default=4,
+        help="Number of future steps from the tail used to estimate final speed",
+    )
+    parser.add_argument(
+        "--moving_speed_thresh",
+        type=float,
+        default=1.0,
+        help="Minimum current speed required to include a sample in behavior-conditioned modes",
+    )
+    parser.add_argument(
+        "--stop_speed_thresh",
+        type=float,
+        default=0.5,
+        help="Tail speed threshold in m/s used to define stopping behavior",
+    )
     args = parser.parse_args()
 
     if args.device == "cuda" and not torch.cuda.is_available():
@@ -223,6 +309,7 @@ def main():
     positive_count = 0
     negative_count = 0
     missing_detection_frames = 0
+    skipped_behavior_frames = 0
 
     with torch.no_grad():
         for batch in loader:
@@ -244,12 +331,25 @@ def main():
                     missing_detection_frames += 1
                     continue
 
-                is_positive = frame_has_object(
+                has_object = frame_has_object(
                     record=record,
                     label_id=label_id,
                     score_thresh=args.score_thresh,
                     camera_indices=camera_indices,
                 )
+                is_positive = classify_sample(
+                    has_object=has_object,
+                    past=past[sample_idx].detach().cpu(),
+                    future=batch["FUTURE"][sample_idx].detach().cpu(),
+                    label_mode=args.label_mode,
+                    dt=args.dt,
+                    tail_steps=args.tail_steps,
+                    moving_speed_thresh=args.moving_speed_thresh,
+                    stop_speed_thresh=args.stop_speed_thresh,
+                )
+                if is_positive is None:
+                    skipped_behavior_frames += 1
+                    continue
                 feature_row = hidden[sample_idx]
                 active_row = (feature_row > 0).to(torch.float64)
 
@@ -283,9 +383,15 @@ def main():
         "positive_count": positive_count,
         "negative_count": negative_count,
         "missing_detection_frames": missing_detection_frames,
+        "skipped_behavior_frames": skipped_behavior_frames,
         "score_thresh": args.score_thresh,
         "split": args.split,
         "top_k": args.top_k,
+        "label_mode": args.label_mode,
+        "dt": args.dt,
+        "tail_steps": args.tail_steps,
+        "moving_speed_thresh": args.moving_speed_thresh,
+        "stop_speed_thresh": args.stop_speed_thresh,
         **summary,
     }
 
@@ -294,9 +400,11 @@ def main():
     output_path.write_text(json.dumps(output, indent=2))
 
     print(
-        f"Analyzed '{label_name}' (label_id={label_id}) with "
+        f"Analyzed '{label_name}' (label_id={label_id}, label_mode={args.label_mode}) with "
         f"{positive_count} positive and {negative_count} negative frame(s)"
     )
+    if skipped_behavior_frames:
+        print(f"Skipped {skipped_behavior_frames} frame(s) due to behavior-mode filters")
     print(f"Saved SAE object-neuron analysis to {output_path}")
 
 

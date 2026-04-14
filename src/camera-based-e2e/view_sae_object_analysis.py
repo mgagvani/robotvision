@@ -29,6 +29,9 @@ from models.monocular import DeepMonocularModel
 from protos import e2e_pb2
 from sparseAE import SparseAE
 from viz_camera_projection import (
+    CAMERA_FRONT,
+    CAMERA_FRONT_LEFT,
+    CAMERA_FRONT_RIGHT,
     decode_image,
     draw_trajectory_on_image,
     get_camera_calibration,
@@ -39,6 +42,15 @@ try:
     mp.set_sharing_strategy("file_system")
 except RuntimeError:
     pass
+
+
+# Dataset image slots follow the exported/default order:
+# [FRONT_LEFT, FRONT, FRONT_RIGHT, SIDE_LEFT, SIDE_RIGHT, REAR_RIGHT, REAR, REAR_LEFT]
+CAMERA_SLOT_TO_PROTO_NAME = {
+    0: CAMERA_FRONT_LEFT,
+    1: CAMERA_FRONT,
+    2: CAMERA_FRONT_RIGHT,
+}
 
 
 def select_best_trajectory(output: dict) -> torch.Tensor:
@@ -268,6 +280,15 @@ def parse_intervention_modes(spec: str) -> Tuple[str, str]:
     return pieces[0], pieces[1]
 
 
+def slot_to_camera_name(camera_slot: int) -> int:
+    if camera_slot not in CAMERA_SLOT_TO_PROTO_NAME:
+        raise ValueError(
+            f"Camera slot {camera_slot} is not supported for projection. "
+            f"Expected one of {sorted(CAMERA_SLOT_TO_PROTO_NAME)}."
+        )
+    return CAMERA_SLOT_TO_PROTO_NAME[camera_slot]
+
+
 def feature_ids_from_analysis(analysis: dict, key: str, feature_count: int) -> List[int]:
     rows = analysis.get(key, [])
     return [int(row["feature_idx"]) for row in rows[:feature_count]]
@@ -347,6 +368,32 @@ def overlay_projected_trajectory(
     return out
 
 
+def projected_visibility_score(
+    calibration: dict,
+    trajectory_xy: torch.Tensor,
+    future_xy: torch.Tensor,
+) -> int:
+    projected_pred = project_trajectory_to_image(
+        trajectory_xy.cpu().numpy(),
+        calibration["intrinsic"],
+        calibration["extrinsic"],
+        calibration["dist_coeffs"],
+        calibration["width"],
+        calibration["height"],
+    )
+    projected_future = project_trajectory_to_image(
+        future_xy.cpu().numpy(),
+        calibration["intrinsic"],
+        calibration["extrinsic"],
+        calibration["dist_coeffs"],
+        calibration["width"],
+        calibration["height"],
+    )
+    pred_visible = int((~np.isnan(projected_pred).any(axis=1)).sum())
+    future_visible = int((~np.isnan(projected_future).any(axis=1)).sum())
+    return pred_visible + future_visible
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--analysis_json", type=str, required=True)
@@ -360,7 +407,12 @@ def main():
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--block_idx", type=int, default=3)
-    parser.add_argument("--camera_indices", type=str, default="1", help="Comma-separated camera subset to score and display")
+    parser.add_argument(
+        "--camera_indices",
+        type=str,
+        default="1",
+        help="Comma-separated image slots to score/display (0=FRONT_LEFT, 1=FRONT, 2=FRONT_RIGHT)",
+    )
     parser.add_argument("--feature_count", type=int, default=8)
     parser.add_argument(
         "--intervention_modes",
@@ -378,7 +430,8 @@ def main():
         device = torch.device(args.device)
 
     camera_indices = [int(piece.strip()) for piece in args.camera_indices.split(",") if piece.strip()]
-    display_camera = camera_indices[0] if camera_indices else 1
+    display_camera_slot = camera_indices[0] if camera_indices else 1
+    display_camera_name = slot_to_camera_name(display_camera_slot)
 
     analysis = load_analysis_json(args.analysis_json)
     split = analysis.get("split", "val")
@@ -413,8 +466,8 @@ def main():
     if args.n_items is not None:
         dataset.indexes = dataset.indexes[: args.n_items]
 
-    positive_best = {"score": float("-inf"), "dataset_idx": None, "frame_name": None}
-    negative_best = {"score": float("-inf"), "dataset_idx": None, "frame_name": None}
+    positive_candidates = []
+    negative_candidates = []
 
     from torch.utils.data import DataLoader
 
@@ -455,13 +508,57 @@ def main():
                 dataset_idx = running_dataset_idx + sample_idx
                 if y[sample_idx].item() > 0.5:
                     score = float(pos_score[sample_idx].item())
-                    if score > positive_best["score"]:
-                        positive_best = {"score": score, "dataset_idx": dataset_idx, "frame_name": frame_name}
+                    positive_candidates.append(
+                        {"score": score, "dataset_idx": dataset_idx, "frame_name": frame_name}
+                    )
                 else:
                     score = float(neg_score[sample_idx].item())
-                    if score > negative_best["score"]:
-                        negative_best = {"score": score, "dataset_idx": dataset_idx, "frame_name": frame_name}
+                    negative_candidates.append(
+                        {"score": score, "dataset_idx": dataset_idx, "frame_name": frame_name}
+                    )
             running_dataset_idx += hidden.size(0)
+
+    positive_candidates.sort(key=lambda row: row["score"], reverse=True)
+    negative_candidates.sort(key=lambda row: row["score"], reverse=True)
+
+    def choose_visible_example(candidates, feature_ids, intervention_mode):
+        fallback = candidates[0] if candidates else {"score": float("-inf"), "dataset_idx": None, "frame_name": None}
+        for example_info in candidates:
+            sample = dataset[example_info["dataset_idx"]]
+            batch = build_single_batch(sample)
+            baseline_traj, _, _, future = run_model_outputs(
+                model=model,
+                sae=sae,
+                target_layer=target_layer,
+                batch=batch,
+                device=device,
+                feature_ids=feature_ids,
+                target_sample_idx=0,
+                intervention_mode=intervention_mode,
+                amplify_factor=args.amplify_factor,
+            )
+            _, calibration = load_front_camera_projection_assets(
+                dataset,
+                example_info["dataset_idx"],
+                camera_name=display_camera_name,
+            )
+            visibility = projected_visibility_score(
+                calibration=calibration,
+                trajectory_xy=baseline_traj[0],
+                future_xy=future[0],
+            )
+            if visibility >= 2:
+                selected = dict(example_info)
+                selected["visibility_score"] = visibility
+                return selected
+
+        selected = dict(fallback)
+        if selected["dataset_idx"] is not None:
+            selected["visibility_score"] = 0
+        return selected
+
+    positive_best = choose_visible_example(positive_candidates, positive_feature_ids, positive_mode)
+    negative_best = choose_visible_example(negative_candidates, negative_feature_ids, negative_mode)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -513,13 +610,15 @@ def main():
             amplify_factor=args.amplify_factor,
         )
 
-        display_cam = display_camera
         raw_image, calibration = load_front_camera_projection_assets(
             dataset,
             example_info["dataset_idx"],
-            camera_name=display_cam,
+            camera_name=display_camera_name,
         )
-        detection_record = record["detections"].get("0", {"boxes": [], "label_names": [], "scores": []})
+        detection_record = record["detections"].get(
+            str(display_camera_slot),
+            {"boxes": [], "label_names": [], "scores": []},
+        )
         baseline_overlay = overlay_projected_trajectory(
             image=raw_image,
             calibration=calibration,
