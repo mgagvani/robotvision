@@ -76,16 +76,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Data 
-    # #region agent log
-    try:
-        _logpath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug-aec3fc.log")
-        open(_logpath, "a").write(
-            '{"sessionId":"aec3fc","hypothesisId":"H1,H2","location":"train.py:datasets","message":"train_val_config","data":{"data_dir":"%s","train_index":"index_train.pkl","val_index":"index_val.pkl","has_val_loader":true}}\n'
-            % (str(args.data_dir),)
-        )
-    except Exception:
-        pass
-    # #endregion
     train_dataset = WaymoE2E(indexFile='index_train.pkl', data_dir=args.data_dir, n_items=250_000)
     test_dataset = WaymoE2E(indexFile='index_val.pkl', data_dir=args.data_dir, n_items=25_000)
 

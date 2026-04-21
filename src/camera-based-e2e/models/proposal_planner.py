@@ -28,7 +28,6 @@ class ProposalPlanner(nn.Module):
         num_cams: int = 8,
     ):
         super().__init__()
-        self.num_proposals = num_proposals
         self.horizon = horizon
         self.n_proposals = num_proposals
 

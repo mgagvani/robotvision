@@ -37,7 +37,6 @@ def _read_hparams_kv(hparams_path: Path) -> Dict[str, str]:
         "score_rank_weight",
         "score_margin",
         "score_topk",
-        "comfort_jerk_threshold",
         "model_type",
     }
     out: Dict[str, str] = {}
