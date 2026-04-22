@@ -303,6 +303,14 @@ class LitModel(pl.LightningModule):
                 # H(p) = -sum(p) * log(p)
                 entropy = -(p * (p + 1e-8).log()).sum(dim=1).mean()
                 loss_score = loss_selection - entropy_lambda * entropy
+            elif loss_type == "margin":
+                s_diff = pred_scores.unsqueeze(2) - pred_scores.unsqueeze(1)  # (B, K, K): s_i - s_j
+                ade_diff = ade.unsqueeze(2) - ade.unsqueeze(1)                # (B, K, K): a_i - a_j
+                # target=1 when i is worse (ade_i > ade_j), want s_i > s_j
+                target = (ade_diff > 0).float()
+                weight = ade_diff.abs()
+                per_pair = F.binary_cross_entropy_with_logits(s_diff, target, reduction='none')
+                loss_score = (per_pair * weight).sum() / (weight.sum() + 1e-8)
             else:
                 raise NotImplementedError(f"Loss {loss_type} is not implemented")
             pred_idx = pred_scores.argmin(dim=1)
