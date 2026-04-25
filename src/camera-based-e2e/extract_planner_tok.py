@@ -7,6 +7,7 @@ from loader import WaymoE2E
 from models.base_model import LitModel, collate_with_images
 from models.feature_extractors import SAMFeatures
 from models.monocular import DeepMonocularModel
+from sae_utils import DRVLA_SAE_VERSION, DRVLA_SOURCE_NOTE, DRVLA_SOURCE_URLS, planner_token_key
 
 
 def load_model(checkpoint_path: str, device: torch.device) -> tuple[DeepMonocularModel, LitModel]:
@@ -71,6 +72,7 @@ if __name__ == "__main__":
     traj = []
     score = []
     control = []
+    block_tokens = None
 
     with torch.inference_mode():
         for batch in loader:
@@ -84,11 +86,18 @@ if __name__ == "__main__":
                 "IMAGES": lit_model.decode_batch_jpeg(batch["IMAGES_JPEG"], device=device),
                 "INTENT": batch["INTENT"].to(device, non_blocking=True),
             }
-            out = model(model_inputs)
+            out = model(model_inputs, return_block_tokens=True)
             planner_tok.append(out["planner_query_tok"].cpu())
             traj.append(out["trajectory"].cpu())
             score.append(out["scores"].cpu())
             control.append(out["controls"].cpu())
+            if block_tokens is None:
+                block_tokens = {
+                    planner_token_key(block_idx): []
+                    for block_idx in range(model.cfg.n_blocks)
+                }
+            for key in block_tokens:
+                block_tokens[key].append(out[key].cpu())
 
     final = {
         "planner_query_tok": torch.cat(planner_tok, dim=0),
@@ -97,14 +106,28 @@ if __name__ == "__main__":
         "intent": torch.cat(intent, dim=0),
         "names": names,
         "meta": {
-            "checkpoint": args.checkpoint,
-            "index_file": args.index_file,
+            "checkpoint": str(Path(args.checkpoint).resolve()),
+            "index_file": str(Path(args.index_file).resolve()),
+            "data_dir": str(Path(args.data_dir).resolve()),
             "num_samples": len(names),
+            "n_items": args.n_items,
+            "n_blocks": model.cfg.n_blocks,
+            "sae_version": DRVLA_SAE_VERSION,
+            "source_note": DRVLA_SOURCE_NOTE,
+            "source_urls": list(DRVLA_SOURCE_URLS),
+            "activation_kind": "post_transformer_block_query",
+            "planner_query_token_keys": [
+                planner_token_key(block_idx) for block_idx in range(model.cfg.n_blocks)
+            ],
         },
         "trajectory": torch.cat(traj, dim=0),
         "scores": torch.cat(score, dim=0),
         "controls": torch.cat(control, dim=0),
     }
+    if block_tokens is not None:
+        for key, value in block_tokens.items():
+            final[key] = torch.cat(value, dim=0)
+        final["planner_query_tok"] = final[planner_token_key(model.cfg.n_blocks - 1)]
 
     output_path = Path(args.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

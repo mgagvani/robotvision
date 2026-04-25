@@ -7,6 +7,13 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from models.sae import SparseAutoencoder
+from sae_utils import (
+    build_sae_from_checkpoint,
+    default_analysis_dir,
+    default_device,
+    load_sae_bundle,
+    resolve_token_tensor,
+)
 
 
 INTENT_NAMES = {
@@ -17,27 +24,15 @@ INTENT_NAMES = {
 }
 
 
-def normalize(x: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
-    return (x - mean) / std
-
-
 def safe_div(num: torch.Tensor, den: torch.Tensor) -> torch.Tensor:
     out = torch.zeros_like(num)
     mask = den != 0
     out[mask] = num[mask] / den[mask]
     return out
-
-
-def default_device() -> str:
-    return "cuda" if torch.cuda.is_available() else "cpu"
-
-
 def compute_stats(
     model: SparseAutoencoder,
     token_tensor: torch.Tensor,
     intent_tensor: torch.Tensor,
-    mean: torch.Tensor,
-    std: torch.Tensor,
     batch_size: int,
     device: torch.device,
 ) -> dict:
@@ -62,7 +57,7 @@ def compute_stats(
             batch_x = batch_x.to(device, non_blocking=True)
             batch_intent = batch_intent.to(device, non_blocking=True)
 
-            z = model.encode(normalize(batch_x, mean, std))
+            z = model.encode(batch_x)
             z_cpu = z.cpu().to(torch.float64)
             intent_cpu = batch_intent.cpu()
 
@@ -233,59 +228,41 @@ def print_summary(stats: dict, top_k: int) -> None:
                 f"eta^2={eta_val:.5f} mean={mean_val:.4f} active={active_rate_val:.3f}"
             )
         print("")
-
-
-def infer_paths(run_root: Path, split: str) -> tuple[Path, Path, Path]:
-    ckpt_path = run_root / "model" / "sae_checkpoint.pt"
-    norm_path = run_root / "model" / "sae_normalization.pt"
-    token_path = run_root / "tokens" / f"planner_tokens_{split}.pt"
-    return ckpt_path, norm_path, token_path
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--run_root", type=str, required=True)
     parser.add_argument("--split", type=str, default="val", choices=["train", "val"])
     parser.add_argument("--output_dir", type=str, default=None)
+    parser.add_argument("--sae_block", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=4096)
     parser.add_argument("--device", type=str, default=default_device())
     parser.add_argument("--top_k", type=int, default=15)
     args = parser.parse_args()
 
     run_root = Path(args.run_root)
-    output_dir = Path(args.output_dir) if args.output_dir else run_root / "analysis"
+    output_dir = default_analysis_dir(run_root, args.sae_block, args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    ckpt_path, norm_path, token_path = infer_paths(run_root, args.split)
     device = torch.device(args.device)
+    bundle = load_sae_bundle(run_root, args.split, args.sae_block, map_location="cpu")
+    ckpt = bundle["ckpt"]
+    token_blob = bundle["token_blob"]
 
-    ckpt = torch.load(ckpt_path, map_location="cpu")
-    norm = torch.load(norm_path, map_location="cpu")
-    token_blob = torch.load(token_path, map_location="cpu")
-
-    model = SparseAutoencoder(
-        input_dim=ckpt["input_dim"],
-        latent_dim=ckpt["latent_dim"],
-    )
-    model.load_state_dict(ckpt["state_dict"])
+    model = build_sae_from_checkpoint(ckpt, bundle["legacy_norm"])
     model.to(device)
 
-    token_tensor = token_blob["planner_query_tok"].float()
+    token_tensor, token_key = resolve_token_tensor(token_blob, args.sae_block)
     intent_tensor = token_blob["intent"].long()
-    mean = norm["mean"].to(device)
-    std = norm["std"].to(device)
 
     stats = compute_stats(
         model=model,
         token_tensor=token_tensor,
         intent_tensor=intent_tensor,
-        mean=mean,
-        std=std,
         batch_size=args.batch_size,
         device=device,
     )
 
-    output_csv = output_dir / f"sae_intent_correlation_{args.split}.csv"
+    output_csv = output_dir / f"sae_intent_correlation_block_{args.sae_block}_{args.split}.csv"
     write_csv(stats, output_csv)
     print_summary(stats, top_k=args.top_k)
+    print(f"Used token key {token_key}")
     print(f"Saved CSV to {output_csv}")

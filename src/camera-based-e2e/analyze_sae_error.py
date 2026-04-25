@@ -7,6 +7,13 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from models.sae import SparseAutoencoder
+from sae_utils import (
+    build_sae_from_checkpoint,
+    default_analysis_dir,
+    default_device,
+    load_sae_bundle,
+    resolve_token_tensor,
+)
 
 
 INTENT_NAMES = {
@@ -15,12 +22,6 @@ INTENT_NAMES = {
     2: "GO_LEFT",
     3: "GO_RIGHT",
 }
-
-
-def normalize(x: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
-    return (x - mean) / std
-
-
 def pearson_from_sums(
     n: int,
     sum_x: torch.Tensor,
@@ -77,8 +78,6 @@ def compute_feature_stats(
     model: SparseAutoencoder,
     token_tensor: torch.Tensor,
     metric_tensors: dict[str, torch.Tensor],
-    mean: torch.Tensor,
-    std: torch.Tensor,
     batch_size: int,
     device: torch.device,
 ) -> dict:
@@ -118,7 +117,7 @@ def compute_feature_stats(
     with torch.no_grad():
         for batch in loader:
             batch_x = batch[0].to(device, non_blocking=True)
-            z = model.encode(normalize(batch_x, mean, std)).cpu().to(torch.float64)
+            z = model.encode(batch_x).cpu().to(torch.float64)
 
             sum_x += z.sum(dim=0)
             sum_x2 += (z * z).sum(dim=0)
@@ -248,44 +247,32 @@ if __name__ == "__main__":
     parser.add_argument("--run_root", type=str, required=True)
     parser.add_argument("--split", type=str, default="val", choices=["train", "val"])
     parser.add_argument("--output_dir", type=str, default=None)
+    parser.add_argument("--sae_block", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=4096)
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--device", type=str, default=default_device())
     parser.add_argument("--top_k", type=int, default=15)
     args = parser.parse_args()
 
     run_root = Path(args.run_root)
-    output_dir = Path(args.output_dir) if args.output_dir else run_root / "analysis"
+    output_dir = default_analysis_dir(run_root, args.sae_block, args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    ckpt_path = run_root / "model" / "sae_checkpoint.pt"
-    norm_path = run_root / "model" / "sae_normalization.pt"
-    token_path = run_root / "tokens" / f"planner_tokens_{args.split}.pt"
-
     device = torch.device(args.device)
-    ckpt = torch.load(ckpt_path, map_location="cpu")
-    norm = torch.load(norm_path, map_location="cpu")
-    token_blob = torch.load(token_path, map_location="cpu")
+    bundle = load_sae_bundle(run_root, args.split, args.sae_block, map_location="cpu")
+    ckpt = bundle["ckpt"]
+    token_blob = bundle["token_blob"]
 
-    model = SparseAutoencoder(
-        input_dim=ckpt["input_dim"],
-        latent_dim=ckpt["latent_dim"],
-    )
-    model.load_state_dict(ckpt["state_dict"])
+    model = build_sae_from_checkpoint(ckpt, bundle["legacy_norm"])
     model.to(device)
 
-    token_tensor = token_blob["planner_query_tok"].float()
+    token_tensor, token_key = resolve_token_tensor(token_blob, args.sae_block)
     error_metrics = compute_ade_metrics(token_blob)
     intent = error_metrics.pop("intent")
-
-    mean = norm["mean"].to(device)
-    std = norm["std"].to(device)
 
     stats = compute_feature_stats(
         model=model,
         token_tensor=token_tensor,
         metric_tensors=error_metrics,
-        mean=mean,
-        std=std,
         batch_size=args.batch_size,
         device=device,
     )
@@ -294,6 +281,7 @@ if __name__ == "__main__":
     for metric_name, metric_stats in stats["metrics"].items():
         print_metric_summary(metric_name, metric_stats, top_k=args.top_k)
 
-    output_csv = output_dir / f"sae_error_correlation_{args.split}.csv"
+    output_csv = output_dir / f"sae_error_correlation_block_{args.sae_block}_{args.split}.csv"
     write_csv(stats, output_csv)
+    print(f"Used token key {token_key}")
     print(f"Saved CSV to {output_csv}")

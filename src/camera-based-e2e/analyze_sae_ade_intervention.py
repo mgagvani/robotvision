@@ -6,22 +6,60 @@ import torch
 
 from extract_planner_tok import load_model
 from models.sae import SparseAutoencoder
+from sae_utils import (
+    DEFAULT_SAE_BLOCK,
+    build_sae_from_checkpoint,
+    collate_dataset_indices,
+    dataset_from_token_blob,
+    default_device,
+    encode_tensor_batchwise,
+    load_sae_bundle,
+    prepare_replay_context,
+    resolve_token_tensor,
+)
 
 
 def parse_int_list(text: str) -> list[int]:
     return [int(part.strip()) for part in text.split(",") if part.strip()]
 
 
+def parse_feature_spec(text: str, latent_dim: int) -> list[int]:
+    raw = text.strip().lower()
+    if raw in {"all", "*"}:
+        return list(range(latent_dim))
+
+    if ":" in raw and "," not in raw:
+        parts = raw.split(":")
+        if len(parts) not in {2, 3}:
+            raise ValueError(f"Unsupported feature slice: {text}")
+        start = int(parts[0]) if parts[0] else 0
+        stop = int(parts[1]) if parts[1] else latent_dim
+        step = int(parts[2]) if len(parts) == 3 and parts[2] else 1
+        return list(range(start, stop, step))
+
+    return parse_int_list(text)
+
+
 def parse_float_list(text: str) -> list[float]:
     return [float(part.strip()) for part in text.split(",") if part.strip()]
 
 
-def normalize(x: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
-    return (x - mean) / std
-
-
-def denormalize(x: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
-    return x * std + mean
+def clip_feature_list(
+    features: list[int],
+    latent_dim: int,
+    feature_start: int | None,
+    feature_end: int | None,
+) -> list[int]:
+    clipped = []
+    for feature_idx in features:
+        if feature_idx < 0 or feature_idx >= latent_dim:
+            continue
+        if feature_start is not None and feature_idx < feature_start:
+            continue
+        if feature_end is not None and feature_idx >= feature_end:
+            continue
+        clipped.append(feature_idx)
+    return clipped
 
 
 def rank_along_levels(values: torch.Tensor) -> torch.Tensor:
@@ -45,7 +83,12 @@ def spearman_vs_level(curves: torch.Tensor) -> torch.Tensor:
     return (x[:, None] * y).sum(dim=0) / (x_denom * y_denom)
 
 
-def selected_and_oracle_ade(out: dict, future_batch: torch.Tensor, num_proposals: int, horizon: int) -> tuple[torch.Tensor, torch.Tensor]:
+def selected_and_oracle_ade(
+    out: dict,
+    future_batch: torch.Tensor,
+    num_proposals: int,
+    horizon: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
     batch = future_batch.size(0)
     traj = out["trajectory"].view(batch, num_proposals, horizon, 2)
     scores = out["scores"]
@@ -60,18 +103,21 @@ def selected_and_oracle_ade(out: dict, future_batch: torch.Tensor, num_proposals
 
 def summarize_feature(
     feature_idx: int,
+    token_tensor_cpu: torch.Tensor,
     z_all: torch.Tensor,
     scales: torch.Tensor,
     sae: SparseAutoencoder,
     planner_model,
+    lit_model,
+    sae_block: int,
     past: torch.Tensor,
     future: torch.Tensor,
-    mean: torch.Tensor,
-    std: torch.Tensor,
     relevant_scenes: int,
     alphas: list[float],
     scene_selection: str,
     random_seed: int,
+    dataset,
+    device: torch.device,
 ) -> dict:
     feature_act = z_all[:, feature_idx]
     active_mask = feature_act > 0
@@ -105,11 +151,20 @@ def summarize_feature(
         rel_idx = torch.randperm(z_all.size(0), generator=generator)[:keep]
     else:
         raise ValueError(f"Unsupported scene_selection={scene_selection}")
-    z_rel = z_all[rel_idx].clone()
-    past_rel = past[rel_idx]
-    future_rel = future[rel_idx]
+
+    z_rel = z_all[rel_idx].clone().to(device)
+    future_rel = future[rel_idx].to(device)
+    base_x = token_tensor_cpu[rel_idx].to(device)
     base_activation = z_rel[:, feature_idx].clone()
     scale = float(scales[feature_idx].item())
+
+    if sae_block == DEFAULT_SAE_BLOCK:
+        replay_context = None
+        past_rel = past[rel_idx].to(device)
+    else:
+        batch = collate_dataset_indices(dataset, rel_idx)
+        replay_context = prepare_replay_context(planner_model, lit_model, batch, device=device)
+        past_rel = replay_context["past"]
 
     selected_curves = []
     oracle_curves = []
@@ -117,9 +172,16 @@ def summarize_feature(
         for alpha in alphas:
             z_mod = z_rel.clone()
             z_mod[:, feature_idx] = (base_activation + alpha * scale).clamp_min(0.0)
-            recon_norm = sae.decode(z_mod)
-            recon_query = denormalize(recon_norm, mean, std)
-            out = planner_model.forward_from_planner_query_tok(recon_query, past_rel)
+            recon_query = sae.decode_to_input(z_mod, reference_x=base_x)
+            if sae_block == DEFAULT_SAE_BLOCK:
+                out = planner_model.forward_from_planner_query_tok(recon_query, past_rel)
+            else:
+                out = planner_model.forward_from_block_query_tok(
+                    recon_query,
+                    past_rel,
+                    replay_context["tokens"],
+                    start_block=sae_block,
+                )
             selected_ade, oracle_ade = selected_and_oracle_ade(
                 out=out,
                 future_batch=future_rel,
@@ -181,46 +243,51 @@ if __name__ == "__main__":
     parser.add_argument("--planner_checkpoint", type=str, required=True)
     parser.add_argument("--split", type=str, default="val", choices=["train", "val"])
     parser.add_argument("--features", type=str, required=True)
+    parser.add_argument("--sae_block", type=int, default=3)
+    parser.add_argument("--data_dir", type=str, default=None)
+    parser.add_argument("--index_file", type=str, default=None)
+    parser.add_argument("--feature_start", type=int, default=None)
+    parser.add_argument("--feature_end", type=int, default=None)
     parser.add_argument("--alphas", type=str, default="0,0.5,1.0,2.0")
     parser.add_argument("--relevant_scenes_per_feature", type=int, default=384)
     parser.add_argument("--scene_selection", type=str, default="relevant", choices=["relevant", "random"])
     parser.add_argument("--random_seeds", type=str, default="0")
     parser.add_argument("--batch_size", type=int, default=4096)
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--device", type=str, default=default_device())
     parser.add_argument("--output_csv", type=str, required=True)
     args = parser.parse_args()
 
     device = torch.device(args.device)
     run_root = Path(args.run_root)
 
-    sae_ckpt = torch.load(run_root / "model" / "sae_checkpoint.pt", map_location="cpu")
-    norm = torch.load(run_root / "model" / "sae_normalization.pt", map_location="cpu")
-    token_blob = torch.load(run_root / "tokens" / f"planner_tokens_{args.split}.pt", map_location="cpu")
+    bundle = load_sae_bundle(run_root, args.split, args.sae_block, map_location="cpu")
+    sae_ckpt = bundle["ckpt"]
+    token_blob = bundle["token_blob"]
+    token_tensor, token_key = resolve_token_tensor(token_blob, args.sae_block)
 
-    sae = SparseAutoencoder(
-        input_dim=sae_ckpt["input_dim"],
-        latent_dim=sae_ckpt["latent_dim"],
-    )
-    sae.load_state_dict(sae_ckpt["state_dict"])
+    sae = build_sae_from_checkpoint(sae_ckpt, bundle["legacy_norm"])
     sae.to(device)
     sae.eval()
 
-    planner_model, _ = load_model(args.planner_checkpoint, device=device)
+    planner_model, lit_model = load_model(args.planner_checkpoint, device=device)
     planner_model.eval()
 
-    mean = norm["mean"].to(device)
-    std = norm["std"].to(device)
+    past = token_blob["past"].float()
+    future = token_blob["future"].float()
 
-    token_tensor = token_blob["planner_query_tok"].float()
-    past = token_blob["past"].float().to(device)
-    future = token_blob["future"].float().to(device)
-
-    latents = []
-    with torch.no_grad():
-        for i in range(0, len(token_tensor), args.batch_size):
-            batch_x = token_tensor[i : i + args.batch_size].to(device)
-            latents.append(sae.encode(normalize(batch_x, mean, std)).cpu())
-    z_all = torch.cat(latents, dim=0).to(device)
+    z_all = encode_tensor_batchwise(
+        sae,
+        token_tensor,
+        batch_size=args.batch_size,
+        device=device,
+    )
+    latent_dim = sae_ckpt["latent_dim"]
+    features = clip_feature_list(
+        parse_feature_spec(args.features, latent_dim=latent_dim),
+        latent_dim=latent_dim,
+        feature_start=args.feature_start,
+        feature_end=args.feature_end,
+    )
 
     active_mask = z_all > 0
     active_count = active_mask.sum(dim=0)
@@ -231,27 +298,39 @@ if __name__ == "__main__":
     active_std = torch.sqrt(active_var.clamp_min(0.0))
     scales = torch.maximum(active_std, 0.25 * active_mean).clamp_min(0.05)
 
+    dataset = None
+    if args.sae_block != DEFAULT_SAE_BLOCK:
+        dataset = dataset_from_token_blob(
+            token_blob,
+            data_dir=args.data_dir,
+            index_file=args.index_file,
+        )
+
     rows = []
     for random_seed in parse_int_list(args.random_seeds):
-        for feature_idx in parse_int_list(args.features):
+        for feature_idx in features:
             row = summarize_feature(
                 feature_idx=feature_idx,
+                token_tensor_cpu=token_tensor,
                 z_all=z_all,
                 scales=scales,
                 sae=sae,
                 planner_model=planner_model,
+                lit_model=lit_model,
+                sae_block=args.sae_block,
                 past=past,
                 future=future,
-                mean=mean,
-                std=std,
                 relevant_scenes=args.relevant_scenes_per_feature,
                 alphas=parse_float_list(args.alphas),
                 scene_selection=args.scene_selection,
                 random_seed=random_seed,
+                dataset=dataset,
+                device=device,
             )
             rows.append(row)
             print(row)
 
     rows.sort(key=lambda row: row["mean_delta_selected_ade"])
     write_csv(Path(args.output_csv), rows)
+    print(f"Used token key {token_key}")
     print(f"Saved CSV to {args.output_csv}")

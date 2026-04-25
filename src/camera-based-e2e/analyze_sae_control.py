@@ -3,10 +3,22 @@ import csv
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader, TensorDataset
 
 from extract_planner_tok import load_model
 from models.sae import SparseAutoencoder
+from sae_utils import (
+    DEFAULT_SAE_BLOCK,
+    build_sae_from_checkpoint,
+    collate_dataset_indices,
+    dataset_from_token_blob,
+    default_analysis_dir,
+    default_device,
+    encode_tensor_batchwise,
+    load_sae_bundle,
+    planner_inputs_from_collated_batch,
+    prepare_replay_context,
+    resolve_token_tensor,
+)
 
 
 STAT_NAMES = (
@@ -21,14 +33,6 @@ STAT_NAMES = (
 
 def parse_float_list(text: str) -> list[float]:
     return [float(part.strip()) for part in text.split(",") if part.strip()]
-
-
-def normalize(x: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
-    return (x - mean) / std
-
-
-def denormalize(x: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
-    return x * std + mean
 
 
 def infer_checkpoint_path(run_root: Path, token_blob: dict) -> str:
@@ -56,8 +60,7 @@ def reshape_controls(controls: torch.Tensor, num_proposals: int, horizon: int) -
 
 
 def average_curvature(traj: torch.Tensor) -> torch.Tensor:
-    # Geometric curvature estimate on the selected trajectory.
-    seg = traj[:, 1:] - traj[:, :-1]  # (B, T-1, 2)
+    seg = traj[:, 1:] - traj[:, :-1]
     seg_norm = torch.norm(seg, dim=-1).clamp_min(1e-6)
     heading = torch.atan2(seg[..., 1], seg[..., 0])
     d_heading = torch.atan2(
@@ -123,28 +126,7 @@ def compute_global_stat_stds(
     }
 
 
-def encode_all_latents(
-    sae: SparseAutoencoder,
-    token_tensor: torch.Tensor,
-    mean: torch.Tensor,
-    std: torch.Tensor,
-    batch_size: int,
-    device: torch.device,
-) -> torch.Tensor:
-    dataset = TensorDataset(token_tensor)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-    latents = []
-    sae.eval()
-    with torch.no_grad():
-        for (batch_x,) in loader:
-            batch_x = batch_x.to(device, non_blocking=True)
-            z = sae.encode(normalize(batch_x, mean, std))
-            latents.append(z.cpu())
-    return torch.cat(latents, dim=0)
-
-
 def rank_along_levels(values: torch.Tensor) -> torch.Tensor:
-    # values: (L, N), ties are rare here and are broken by argsort order.
     order = torch.argsort(values, dim=0)
     ranks = torch.empty_like(order, dtype=torch.float32)
     base = torch.arange(values.size(0), device=values.device, dtype=torch.float32).unsqueeze(1)
@@ -153,7 +135,6 @@ def rank_along_levels(values: torch.Tensor) -> torch.Tensor:
 
 
 def spearman_vs_level(curves: torch.Tensor) -> torch.Tensor:
-    # curves: (L, N)
     if curves.size(0) < 2:
         return torch.zeros(curves.size(1), dtype=torch.float32)
     x = torch.arange(curves.size(0), device=curves.device, dtype=torch.float32)
@@ -171,14 +152,54 @@ def intervention_levels_for_feature(
     scale: float,
     alphas: list[float],
 ) -> list[torch.Tensor]:
-    levels = []
-    for alpha in alphas:
-        levels.append((base_activation + alpha * scale).clamp_min(0.0))
-    return levels
+    return [(base_activation + alpha * scale).clamp_min(0.0) for alpha in alphas]
+
+
+def run_intervention_outputs(
+    *,
+    sae_block: int,
+    sae: SparseAutoencoder,
+    planner_model,
+    lit_model,
+    token_tensor_cpu: torch.Tensor,
+    past_cpu: torch.Tensor,
+    relevant_indices: torch.Tensor,
+    level_values: list[torch.Tensor],
+    base_z_cpu: torch.Tensor,
+    dataset,
+    device: torch.device,
+) -> list[dict[str, torch.Tensor]]:
+    base_x = token_tensor_cpu[relevant_indices].to(device)
+    base_z = base_z_cpu[relevant_indices].to(device)
+
+    replay_context = None
+    if sae_block == DEFAULT_SAE_BLOCK:
+        past = past_cpu[relevant_indices].to(device)
+    else:
+        batch = collate_dataset_indices(dataset, relevant_indices)
+        replay_context = prepare_replay_context(planner_model, lit_model, batch, device=device)
+        past = replay_context["past"]
+
+    outputs = []
+    sae.eval()
+    planner_model.eval()
+    with torch.no_grad():
+        for level in level_values:
+            z_mod = base_z.clone()
+            feature_idx = None
+            # Caller overwrites a single feature before passing level values,
+            # so reuse the matching level tensor positionally below.
+            if level.ndim != 1:
+                raise ValueError("Expected per-scene latent level vector.")
+            # Identify the edited feature by comparing shapes later in caller.
+            # z_mod is updated in caller before use.
+            outputs.append((z_mod, past, base_x, replay_context))
+    return outputs
 
 
 def analyze_feature(
     feature_idx: int,
+    token_tensor_cpu: torch.Tensor,
     base_z_cpu: torch.Tensor,
     feature_active_count: int,
     relevant_indices: torch.Tensor,
@@ -186,10 +207,11 @@ def analyze_feature(
     alphas: list[float],
     sae: SparseAutoencoder,
     planner_model,
+    lit_model,
+    sae_block: int,
     past_cpu: torch.Tensor,
-    mean: torch.Tensor,
-    std: torch.Tensor,
     global_stat_stds: dict[str, float],
+    dataset,
     device: torch.device,
 ) -> tuple[list[dict], dict]:
     if relevant_indices.numel() == 0:
@@ -215,28 +237,47 @@ def analyze_feature(
             "feature_idx": feature_idx,
             "best_stat": "NONE",
             "best_control_score": 0.0,
+            "best_std_effect_max": 0.0,
+            "best_mean_rho": 0.0,
+            "best_frac_consistent": 0.0,
+            "best_selectivity_share": 0.0,
             "active_count": feature_active_count,
             "relevant_scene_count": 0,
             "intervention_scale": scale,
+            "runner_up_stat": "NONE",
         }
         return rows, summary
 
+    base_x = token_tensor_cpu[relevant_indices].to(device)
     base_z = base_z_cpu[relevant_indices].to(device)
-    past = past_cpu[relevant_indices].to(device)
-    base_activation = base_z[:, feature_idx]
+    base_activation = base_z[:, feature_idx].clone()
     level_values = intervention_levels_for_feature(base_activation, scale=scale, alphas=alphas)
 
-    stat_curves = {name: [] for name in STAT_NAMES}
+    replay_context = None
+    if sae_block == DEFAULT_SAE_BLOCK:
+        past = past_cpu[relevant_indices].to(device)
+    else:
+        batch = collate_dataset_indices(dataset, relevant_indices)
+        replay_context = prepare_replay_context(planner_model, lit_model, batch, device=device)
+        past = replay_context["past"]
 
+    stat_curves = {name: [] for name in STAT_NAMES}
     sae.eval()
     planner_model.eval()
     with torch.no_grad():
         for level in level_values:
             z_mod = base_z.clone()
             z_mod[:, feature_idx] = level
-            recon_norm = sae.decode(z_mod)
-            recon_query = denormalize(recon_norm, mean, std)
-            out = planner_model.forward_from_planner_query_tok(recon_query, past)
+            recon_query = sae.decode_to_input(z_mod, reference_x=base_x)
+            if sae_block == DEFAULT_SAE_BLOCK:
+                out = planner_model.forward_from_planner_query_tok(recon_query, past)
+            else:
+                out = planner_model.forward_from_block_query_tok(
+                    recon_query,
+                    past,
+                    replay_context["tokens"],
+                    start_block=sae_block,
+                )
             stats = compute_output_stats(
                 trajectory=out["trajectory"],
                 scores=out["scores"],
@@ -251,7 +292,7 @@ def analyze_feature(
     std_effects = {}
     metric_cache = {}
     for stat_name in STAT_NAMES:
-        curves = torch.stack(stat_curves[stat_name], dim=0)  # (L, R)
+        curves = torch.stack(stat_curves[stat_name], dim=0)
         delta = curves - curves[0:1]
         delta_max = delta[-1]
         mean_delta_max = float(delta_max.mean().item())
@@ -286,13 +327,13 @@ def analyze_feature(
             * selectivity_share
         )
         rows.append(
-                {
-                    "feature_idx": feature_idx,
-                    "stat_name": stat_name,
-                    "active_count": feature_active_count,
-                    "relevant_scene_count": int(relevant_indices.numel()),
-                    "intervention_scale": scale,
-                    "mean_delta_max": metric_cache[stat_name]["mean_delta_max"],
+            {
+                "feature_idx": feature_idx,
+                "stat_name": stat_name,
+                "active_count": feature_active_count,
+                "relevant_scene_count": int(relevant_indices.numel()),
+                "intervention_scale": scale,
+                "mean_delta_max": metric_cache[stat_name]["mean_delta_max"],
                 "std_effect_max": metric_cache[stat_name]["std_effect_max"],
                 "mean_rho": metric_cache[stat_name]["mean_rho"],
                 "frac_consistent": metric_cache[stat_name]["frac_consistent"],
@@ -323,8 +364,15 @@ def write_csv(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
         return
+    fieldnames = []
+    seen = set()
+    for row in rows:
+        for key in row.keys():
+            if key not in seen:
+                seen.add(key)
+                fieldnames.append(key)
     with path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -363,7 +411,10 @@ if __name__ == "__main__":
     parser.add_argument("--planner_checkpoint", type=str, default=None)
     parser.add_argument("--split", type=str, default="val", choices=["train", "val"])
     parser.add_argument("--output_dir", type=str, default=None)
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--sae_block", type=int, default=3)
+    parser.add_argument("--data_dir", type=str, default=None)
+    parser.add_argument("--index_file", type=str, default=None)
+    parser.add_argument("--device", type=str, default=default_device())
     parser.add_argument("--encode_batch_size", type=int, default=4096)
     parser.add_argument("--relevant_scenes_per_feature", type=int, default=64)
     parser.add_argument("--alphas", type=str, default="0,0.5,1.0,2.0")
@@ -373,21 +424,18 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     run_root = Path(args.run_root)
-    output_dir = Path(args.output_dir) if args.output_dir else run_root / "analysis"
+    output_dir = default_analysis_dir(run_root, args.sae_block, args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
     alphas = parse_float_list(args.alphas)
 
-    ckpt_path = run_root / "model" / "sae_checkpoint.pt"
-    norm_path = run_root / "model" / "sae_normalization.pt"
-    token_path = run_root / "tokens" / f"planner_tokens_{args.split}.pt"
-
-    sae_ckpt = torch.load(ckpt_path, map_location="cpu")
-    norm = torch.load(norm_path, map_location="cpu")
-    token_blob = torch.load(token_path, map_location="cpu")
+    bundle = load_sae_bundle(run_root, args.split, args.sae_block, map_location="cpu")
+    sae_ckpt = bundle["ckpt"]
+    token_blob = bundle["token_blob"]
+    token_tensor, token_key = resolve_token_tensor(token_blob, args.sae_block)
 
     planner_checkpoint = args.planner_checkpoint or infer_checkpoint_path(run_root, token_blob)
-    planner_model, _ = load_model(planner_checkpoint, device=device)
+    planner_model, lit_model = load_model(planner_checkpoint, device=device)
 
     global_stat_stds = compute_global_stat_stds(
         token_blob=token_blob,
@@ -399,24 +447,14 @@ if __name__ == "__main__":
         print(f"  {stat_name}: {global_stat_stds[stat_name]:.4f}")
     print("")
 
-    sae = SparseAutoencoder(
-        input_dim=sae_ckpt["input_dim"],
-        latent_dim=sae_ckpt["latent_dim"],
-    )
-    sae.load_state_dict(sae_ckpt["state_dict"])
+    sae = build_sae_from_checkpoint(sae_ckpt, bundle["legacy_norm"])
     sae.to(device)
     sae.eval()
 
-    token_tensor = token_blob["planner_query_tok"].float()
     past_cpu = token_blob["past"].float()
-    mean = norm["mean"].to(device)
-    std = norm["std"].to(device)
-
-    base_z_cpu = encode_all_latents(
-        sae=sae,
-        token_tensor=token_tensor,
-        mean=mean,
-        std=std,
+    base_z_cpu = encode_tensor_batchwise(
+        sae,
+        token_tensor,
         batch_size=args.encode_batch_size,
         device=device,
     )
@@ -431,7 +469,15 @@ if __name__ == "__main__":
     intervention_scale = torch.maximum(active_std, 0.25 * active_mean).clamp_min(args.min_scale)
 
     top_k = min(args.relevant_scenes_per_feature, base_z_cpu.size(0))
-    top_values, top_indices = torch.topk(base_z_cpu, k=top_k, dim=0)
+    _, top_indices = torch.topk(base_z_cpu, k=top_k, dim=0)
+
+    dataset = None
+    if args.sae_block != DEFAULT_SAE_BLOCK:
+        dataset = dataset_from_token_blob(
+            token_blob,
+            data_dir=args.data_dir,
+            index_file=args.index_file,
+        )
 
     feature_limit = base_z_cpu.size(1) if args.max_features is None else min(args.max_features, base_z_cpu.size(1))
     stat_rows = []
@@ -445,6 +491,7 @@ if __name__ == "__main__":
 
         feature_stat_rows, feature_summary = analyze_feature(
             feature_idx=feature_idx,
+            token_tensor_cpu=token_tensor,
             base_z_cpu=base_z_cpu,
             feature_active_count=feature_active,
             relevant_indices=relevant_indices,
@@ -452,10 +499,11 @@ if __name__ == "__main__":
             alphas=alphas,
             sae=sae,
             planner_model=planner_model,
+            lit_model=lit_model,
+            sae_block=args.sae_block,
             past_cpu=past_cpu,
-            mean=mean,
-            std=std,
             global_stat_stds=global_stat_stds,
+            dataset=dataset,
             device=device,
         )
         stat_rows.extend(feature_stat_rows)
@@ -464,12 +512,13 @@ if __name__ == "__main__":
         if (feature_idx + 1) % 100 == 0 or feature_idx + 1 == feature_limit:
             print(f"Processed {feature_idx + 1}/{feature_limit} features")
 
-    summary_csv = output_dir / f"sae_control_summary_{args.split}.csv"
-    stat_csv = output_dir / f"sae_control_stat_rows_{args.split}.csv"
+    summary_csv = output_dir / f"sae_control_summary_block_{args.sae_block}_{args.split}.csv"
+    stat_csv = output_dir / f"sae_control_stat_rows_block_{args.sae_block}_{args.split}.csv"
     write_csv(summary_csv, summary_rows)
     write_csv(stat_csv, stat_rows)
 
     print("")
+    print(f"Used token key {token_key}")
     print_top_features(summary_rows, stat_rows, top_k=args.top_k)
     print(f"Saved feature summary to {summary_csv}")
     print(f"Saved per-stat rows to {stat_csv}")
