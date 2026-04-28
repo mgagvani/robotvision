@@ -26,6 +26,7 @@ Note that --tp-size 1 is for 1 GPU, if N gpus set to N.
 '''
 
 
+from transformers import pipeline
 from ultralytics import YOLO
 from loader import WaymoE2E
 import argparse
@@ -39,6 +40,9 @@ import dotenv
 from google import genai
 from google.genai import types
 from openai import OpenAI
+
+from diffusers import QwenImageEditPipeline
+import torch
 
 
 PROMPT = '''
@@ -116,6 +120,30 @@ def generate_sglang(scene_description: str):
     )
     return response.choices[0].message.content.strip()
 
+def load_qwen_image_edit(id: str = "Qwen/Qwen-Image-Edit"):
+    pipeline = QwenImageEditPipeline.from_pretrained("Qwen/Qwen-Image-Edit")
+    print("qwen image edit pipeline loaded")
+    pipeline.to(torch.bfloat16)
+    pipeline.to("cuda")
+    pipeline.set_progress_bar_config(disable=None)
+
+
+def generate_qwen_image(pipeline, image: Image.Image, prompt: str):
+    inputs = {
+        "image": image,
+        "prompt": prompt,
+        "generator": torch.manual_seed(0),
+        "true_cfg_scale": 4.0,
+        "negative_prompt": " ", # TODO: add negative prompt!
+        "num_inference_steps": 50,
+    }
+
+    with torch.inference_mode():
+        output = pipeline(**inputs)
+        output_image = output.images[0]
+
+    return output_image
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, required=True, help="Path to Waymo directory")
@@ -133,6 +161,11 @@ if __name__ == "__main__":
     test_dataset = WaymoE2E(
         indexFile="index_val.pkl", data_dir=args.data_dir, n_items=5_000
     )
+
+    # Qwen Image Edit
+    if not os.environ.get("HF_HOME") and os.environ.get("HF_HOME").startswith("/work/nvme/bgxf"):
+        raise RuntimeError("Set HF_HOME to not home bruh")
+    qwen_pipeline = load_qwen_image_edit()
 
     images = []
     for i in range(10):
@@ -166,3 +199,7 @@ if __name__ == "__main__":
         else:
             prompt = generate_gemini(scene_description)
         print(f"Prompt for image {i}: {prompt}")
+
+        # Generate edited image with prompt
+        edited_image = generate_qwen_image(qwen_pipeline, images[i], prompt)
+        edited_image.save(f"edited_image_{i}.jpg")
