@@ -26,6 +26,9 @@ class LitModel(pl.LightningModule):
         super(LitModel, self).__init__()
         self.model = model
 
+        # NVJPEG fall back if we are running on Negishi AMD GPU
+        self.has_nvjpeg = True
+
         # If we are using ScorerModel, which has a cfg, then save the attributes of the cfg as hparams, so they go into wandb
         cfg = getattr(model, "cfg", None)
         if cfg is None:
@@ -74,6 +77,16 @@ class LitModel(pl.LightningModule):
             moved["IMAGES"] = self.decode_batch_jpeg(images_jpeg, device=device)
             return moved
 
+        if "IMAGES" in batch:
+            images = batch["IMAGES"]
+            rest = {k: v for k, v in batch.items() if k != "IMAGES"}
+            moved = super().transfer_batch_to_device(rest, device, dataloader_idx)
+            moved["IMAGES"] = [
+                img.to(device, non_blocking=True) if img is not None else None
+                for img in images
+            ]
+            return moved
+
         return super().transfer_batch_to_device(batch, device, dataloader_idx)
 
 
@@ -81,12 +94,16 @@ class LitModel(pl.LightningModule):
         self,
         images_jpeg: list[list[torch.Tensor]],
         device: torch.device | None = None,
-    ) -> list[torch.Tensor]:
+    ) -> list[torch.Tensor | None]:
+        cam_idxs_used = tuple(getattr(self.model.cfg, "cam_idxs_used", range(len(images_jpeg))))
         decode_device = self.device if device is None else device
+
+        selected = [(cam_idx, images_jpeg[cam_idx]) for cam_idx in cam_idxs_used]
+
         # Flatten cameras
         flat_encoded, cam_sizes = [], []
-        for cam in images_jpeg:
-            cam_sizes.append(len(cam))
+        for cam_idx, cam in selected:
+            cam_sizes.append((cam_idx, len(cam)))
             for jpg in cam:
                 t = jpg if isinstance(jpg, torch.Tensor) else torch.frombuffer(memoryview(jpg), dtype=torch.uint8)
                 # decode_jpeg requires the raw jpeg bytes to be on cpu
@@ -94,18 +111,30 @@ class LitModel(pl.LightningModule):
                     t = t.cpu()
                 flat_encoded.append(t)
         
-        flat_decoded = torchvision.io.decode_jpeg(
-            flat_encoded, 
-            mode=torchvision.io.ImageReadMode.UNCHANGED,
-            device=decode_device,
-        ) # list of (C, H, W) gpu tensors
+        try:
+            flat_decoded = torchvision.io.decode_jpeg(
+                flat_encoded, 
+                mode=torchvision.io.ImageReadMode.UNCHANGED,
+                device=decode_device,
+            ) # list of (C, H, W) gpu tensors
+        except Exception as e:
+            if "nvJPEG" not in str(e):
+                raise e
+            self.has_nvjpeg = False
+            flat_decoded = torchvision.io.decode_jpeg(
+                flat_encoded,
+                mode=torchvision.io.ImageReadMode.UNCHANGED,
+                device="cpu",
+            )
+            if torch.device(decode_device).type == "cuda":
+                flat_decoded = [img.to(decode_device, non_blocking=True) for img in flat_decoded]
 
-        out = []
+        out = [None] * len(images_jpeg)
         idx = 0
-        for n in cam_sizes:
-            cam_list = flat_decoded[idx: idx+n]
+        for cam_idx, n in cam_sizes:
+            out[cam_idx] = torch.stack(flat_decoded[idx:idx+n], dim=0)
             idx += n
-            out.append(torch.stack(cam_list, dim=0))  # (B, C, H, W)
+
         return out
 
     def on_fit_start(self) -> None:
@@ -234,8 +263,15 @@ class LitModel(pl.LightningModule):
         pred_future = self.forward(model_inputs)  # (B, T*2)
         pred_depth = None
         pred_scores: torch.Tensor = None
+        pred_traj_flat: torch.Tensor = None
+        query_for_score: torch.Tensor = None
         if isinstance(pred_future, dict):
-            pred_future, pred_depth, pred_scores = pred_future["trajectory"], pred_future.get("depth", None), pred_future.get("scores", None)
+            outputs = pred_future
+            pred_future = outputs["trajectory"]
+            pred_depth = outputs.get("depth", None)
+            pred_scores = outputs.get("scores", None)
+            pred_traj_flat = outputs.get("trajectory_flat", None)
+            query_for_score = outputs.get("query_for_score", None)
 
         pred = pred_future
         t_steps = future.shape[1]
@@ -318,6 +354,40 @@ class LitModel(pl.LightningModule):
         else:
             loss_score = torch.tensor(0.0, device=self.device)
 
+        # Train-only adversarial scorer supervision in trajectory space.
+        loss_adv = torch.tensor(0.0, device=self.device)
+        adv_enabled = bool(getattr(self.hparams, "model_cfg_adv_enabled", False))
+        if (stage == "train" and adv_enabled and k_modes > 1 and pred_scores is not None and pred_traj_flat is not None and query_for_score is not None and hasattr(self.model, "traj_features") and hasattr(self.model, "score_decoder")):
+            epsilon = float(getattr(self.hparams, "model_cfg_adv_epsilon", 0.10)) # max perturbation
+            adv_steps = max(1, int(getattr(self.hparams, "model_cfg_adv_steps", 3))) # running Projected Gradient Descent
+            alpha = epsilon / adv_steps
+
+            original_traj = pred_traj_flat.detach()
+            adv_traj = original_traj
+            for _ in range(adv_steps):
+                # run forward pass of scorer on adversarial trajectory
+                attack_traj = adv_traj.detach().requires_grad_(True)
+                traj_feat_adv = self.model.traj_features(attack_traj)
+                score_adv = self.model.score_decoder(
+                    torch.cat([query_for_score, traj_feat_adv], dim=-1)
+                ).squeeze(-1)
+
+                # compute gradient, gradient ASCENT to MAXIMIZE loss.
+                grad = torch.autograd.grad(score_adv.sum(), attack_traj, only_inputs=True)[0]
+                adv_traj = attack_traj + alpha * grad.sign()
+                delta = torch.clamp(adv_traj - original_traj, min=-epsilon, max=epsilon)
+                adv_traj = (original_traj + delta).detach()
+
+            bsz, _, t2_adv = adv_traj.shape
+            t_adv = t2_adv // 2
+            adv_ade = torch.norm(adv_traj.view(bsz, k_modes, t_adv, 2) - future[:, None], dim=-1,).mean(dim=-1).detach()
+            # Replicate DeepMonocularModel foward pass
+            adv_traj_feat = self.model.traj_features(adv_traj)
+            adv_scores = self.model.score_decoder(
+                torch.cat([query_for_score, adv_traj_feat], dim=-1)
+            ).squeeze(-1)
+            loss_adv = F.mse_loss(adv_scores, adv_ade)
+
         # Scorer Metrics
         scorer_metrics = {}
         if k_modes > 1 and pred_scores is not None:
@@ -349,13 +419,15 @@ class LitModel(pl.LightningModule):
         loss_depth *= 0.1 # slightly enabled
         loss_ade *= 1.0 # TODO: tune loss terms
         loss_score *= 1.0
-        total_loss = loss_ade + loss_depth + loss_score + loss_rfs
+        adv_lambda = float(getattr(self.hparams, "model_cfg_adv_lambda", 0.1))
+        total_loss = loss_ade + loss_depth + loss_score + loss_rfs + (adv_lambda * loss_adv)
         # TODO: improve logging both to disk and to console
         log_payload = {
             f"{stage}_loss_ade": loss_ade,
             f"{stage}_loss_score": loss_score,
             f"{stage}_loss_depth": loss_depth,
             f"{stage}_loss_rfs": loss_rfs,
+            f"{stage}_loss_adv": loss_adv,
             f"{stage}_rfs_unweighted": rfs_unweighted,
             f"{stage}_loss": total_loss,
         }
@@ -376,19 +448,32 @@ class LitModel(pl.LightningModule):
     def validation_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, "val")
     
-def collate_with_images(batch):
+def collate_with_images(batch, cam_idxs=(1,)):
+    """Collate that CPU-decodes requested cameras in the dataloader worker."""
     past = [torch.as_tensor(b["PAST"], dtype=torch.float32) for b in batch]
     future = [torch.as_tensor(b["FUTURE"], dtype=torch.float32) for b in batch]
     intent = torch.as_tensor([b["INTENT"] for b in batch])
     names = [b["NAME"] for b in batch]
 
-    cams = list(zip(*[b["IMAGES_JPEG"] for b in batch]))  # per-camera tuples
-    images_jpeg = [list(cam_imgs) for cam_imgs in cams]  # stay on CPU
+    num_cams = len(batch[0]["IMAGES_JPEG"])
+    images = [None] * num_cams
+    for cam_idx in cam_idxs:
+        jpegs = [
+            b["IMAGES_JPEG"][cam_idx] if isinstance(b["IMAGES_JPEG"][cam_idx], torch.Tensor)
+            else torch.frombuffer(bytearray(b["IMAGES_JPEG"][cam_idx]), dtype=torch.uint8)
+            for b in batch
+        ]
+        decoded = torchvision.io.decode_jpeg(
+            jpegs,
+            mode=torchvision.io.ImageReadMode.UNCHANGED,
+            device="cpu",
+        )
+        images[cam_idx] = torch.stack(decoded, dim=0)
 
     return {
         "PAST": torch.stack(past, dim=0),
         "FUTURE": torch.stack(future, dim=0),
         "INTENT": intent,
-        "IMAGES_JPEG": images_jpeg,
+        "IMAGES": images,
         "NAME": names,
     }
