@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from dataclasses import dataclass
 from math import sqrt
 
 from .blocks import TransformerBlock
@@ -77,6 +78,22 @@ class MonocularModel(nn.Module):
         attention = self.attn_norm(attention)
         return self.decoder(attention.squeeze(1))  # (B, 40)
 
+@dataclass
+class DeepMonocularConfig:
+    # arch
+    n_blocks: int = 4
+    n_proposals: int = 50
+    cam_idxs_used: list = (1,) # front only
+    # kinematics
+    dt: float = 0.25
+    max_accel: float = 8.0
+    max_omega: float = 1.0
+    # adversarial training
+    adv_enabled: bool = True
+    adv_lambda: float = 0.1
+    adv_epsilon: float = 0.10
+    adv_steps: int = 3
+
 class DeepMonocularModel(nn.Module):
     def __init__(
         self,
@@ -89,14 +106,21 @@ class DeepMonocularModel(nn.Module):
         max_omega: float = 1.0,
     ):
         super().__init__()
+        self.cfg = DeepMonocularConfig(
+            n_blocks=n_blocks,
+            n_proposals=n_proposals,
+            dt=dt,
+            max_accel=max_accel,
+            max_omega=max_omega,
+        )
         self.features = feature_extractor
         self.feature_dim = sum(self.features.dims)
         if out_dim % 2 != 0:
             raise ValueError(f"out_dim must be even for (x,y) rollout, got {out_dim}")
         self.horizon = out_dim // 2
-        self.dt = dt
-        self.max_accel = max_accel
-        self.max_omega = max_omega
+        self.dt = self.cfg.dt
+        self.max_accel = self.cfg.max_accel
+        self.max_omega = self.cfg.max_omega
         
         # Initial Query Projection (Intent + Past -> C)
         query_input_dim = 3 + 16 * 6
@@ -116,7 +140,7 @@ class DeepMonocularModel(nn.Module):
         # Deep network rather than single attention in MonocularModel 
         self.blocks = nn.ModuleList([
             TransformerBlock(self.feature_dim, num_heads=8, mlp_dim=self.feature_dim*4)
-            for _ in range(n_blocks)
+            for _ in range(self.cfg.n_blocks)
         ])
 
         # For Supervised Depth Loss -> (B, 128, 128)
@@ -130,7 +154,7 @@ class DeepMonocularModel(nn.Module):
             nn.Conv2d(32, 1, 1)
         )
         
-        self.n_proposals = n_proposals
+        self.n_proposals = self.cfg.n_proposals
         self.traj_decoder = nn.Sequential(
             nn.Linear(self.feature_dim, self.feature_dim),
             nn.GELU(),
@@ -175,57 +199,135 @@ class DeepMonocularModel(nn.Module):
         traj_xy = torch.stack(xy_steps, dim=2)  # (B, K, T, 2)
         return traj_xy, traj_xy.reshape(traj_xy.size(0), -1), accel, omega  # (B, K*T*2)
 
-    def forward(self, x):
-        # Copied from MonocularModel
-        # past: (B, 16, 6), intent: int
-        past, images, intent = x['PAST'], x['IMAGES'], x['INTENT']
-        
-        # Ref: https://github.com/waymo-research/waymo-open-dataset/blob/5f8a1cd42491210e7de629b6f8fc09b65e0cbe99/src/waymo_open_dataset/dataset.proto#L50%20%20order%20=%20[2,%201,%203]
+    def prepare_visual_tokens(
+        self,
+        images,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         front_cam = images[1]
 
-        # Doesn't need no_grad b/c DINO/SAMFeatures will freeze if needed
-        feats_vit = self.features(front_cam)  # list or tensor
-
+        feats_vit = self.features(front_cam)
         if len(feats_vit) == 1 and isinstance(feats_vit, list):
             feats_vit = feats_vit[0]
 
-        feats = self.visual_adapter(feats_vit)  # (B, C, H, W)
+        feats = self.visual_adapter(feats_vit)
+        output_depth = F.softplus(self.depth_gen(feats).squeeze(1))
 
-        # Depth Supervision
-        output_depth = F.softplus(self.depth_gen(feats).squeeze(1))  # (B, 128, 128)
-
-        # tokens: handle list of features or single tensor
-        # TODO: is this made redundant by if statement above?
         if isinstance(feats, (list, tuple)):
-            tokens = torch.cat([f.flatten(2) for f in feats], dim=1)  # (B, C_total, N)
+            tokens = torch.cat([f.flatten(2) for f in feats], dim=1)
         else:
-            tokens = feats.flatten(2)  # (B, C, N)
-        tokens = torch.permute(tokens, (0, 2, 1)) + self.positional_encoding # (B, N, C_total)
-        
-        # copy procedure to build query_0 from MonocularModel
+            tokens = feats.flatten(2)
+        tokens = torch.permute(tokens, (0, 2, 1)) + self.positional_encoding
+        return tokens, output_depth
+
+    def prepare_initial_query(
+        self,
+        past: torch.Tensor,
+        intent: torch.Tensor,
+    ) -> torch.Tensor:
         intent_onehot = F.one_hot((intent - 1).long(), num_classes=3).float()
         past_flat = past.view(past.size(0), -1)
-        query: torch.Tensor = self.query_init(torch.cat([intent_onehot, past_flat], dim=1)).unsqueeze(1)
+        return self.query_init(torch.cat([intent_onehot, past_flat], dim=1)).unsqueeze(1)
 
-        for block in self.blocks:
-            query = block(query, tokens)
+    def forward_transformer_blocks(
+        self,
+        query: torch.Tensor,
+        tokens: torch.Tensor,
+        *,
+        start_block: int = 0,
+        return_block_outputs: bool = False,
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        block_outputs = []
+        for block_idx in range(start_block, len(self.blocks)):
+            query = self.blocks[block_idx](query, tokens)
+            if return_block_outputs:
+                block_outputs.append(query)
+        return query, block_outputs
 
-        # predict (acceleration, angular velocity) for each timestep
-        # and roll it out using the kinematic bicycle model
-        control_pred = self.traj_decoder(query.squeeze(1)).view(
+    def collect_block_query_tokens(
+        self,
+        past: torch.Tensor,
+        images,
+        intent: torch.Tensor,
+    ) -> tuple[list[torch.Tensor], torch.Tensor, torch.Tensor]:
+        tokens, output_depth = self.prepare_visual_tokens(images)
+        query = self.prepare_initial_query(past, intent)
+        _, block_outputs = self.forward_transformer_blocks(
+            query,
+            tokens,
+            return_block_outputs=True,
+        )
+        return block_outputs, tokens, output_depth
+
+    def forward_from_planner_query_tok(
+        self,
+        planner_query_tok: torch.Tensor,
+        past: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        query = planner_query_tok
+        if query.ndim == 3:
+            if query.size(1) != 1:
+                raise ValueError(f"Expected query shape (B, 1, C), got {query.shape}")
+            query = query.squeeze(1)
+        elif query.ndim != 2:
+            raise ValueError(f"Expected query shape (B, C) or (B, 1, C), got {query.shape}")
+
+        control_pred = self.traj_decoder(query).view(
             query.size(0), self.n_proposals, self.horizon, 2
         )  # (B, K, T, 2)
         traj_xy, traj_pred, accel, omega = self.bicycle_model(control_pred, past)  # (B, K, T*2)
 
         traj_pred_flat = traj_xy.reshape(traj_xy.size(0), self.n_proposals, -1)  # (B, K, T*2)
         traj_feat: torch.Tensor = self.traj_features(traj_pred_flat.detach())  # (B, K, C)
-        query_for_score = query.squeeze(1).detach()[:, torch.newaxis, :].expand(-1, self.n_proposals, -1)  # (B, K, C)
+        query_for_score = query.detach()[:, torch.newaxis, :].expand(-1, self.n_proposals, -1)  # (B, K, C)
         score_in = torch.cat([query_for_score, traj_feat], dim=-1)  # (B, K, 2C)
         score_pred = self.score_decoder(score_in).squeeze(-1)  # (B, K)
 
         return {
             "trajectory": traj_pred,
             "scores": score_pred,
-            "depth": output_depth,
             "controls": torch.stack([accel, omega], dim=-1).reshape(query.size(0), -1),
+            "planner_query_tok": query,
         }
+
+    def forward_from_block_query_tok(
+        self,
+        planner_query_tok: torch.Tensor,
+        past: torch.Tensor,
+        tokens: torch.Tensor,
+        *,
+        start_block: int,
+    ) -> dict[str, torch.Tensor]:
+        query = planner_query_tok
+        if query.ndim == 2:
+            query = query.unsqueeze(1)
+        elif query.ndim != 3:
+            raise ValueError(
+                f"Expected planner_query_tok shape (B, C) or (B, 1, C), got {query.shape}"
+            )
+
+        if start_block < 0 or start_block >= len(self.blocks):
+            raise ValueError(f"start_block must be in [0, {len(self.blocks) - 1}], got {start_block}")
+
+        query, _ = self.forward_transformer_blocks(
+            query,
+            tokens,
+            start_block=start_block + 1,
+            return_block_outputs=False,
+        )
+        return self.forward_from_planner_query_tok(query, past)
+
+    def forward(self, x, return_block_tokens: bool = False):
+        past, images, intent = x['PAST'], x['IMAGES'], x['INTENT']
+
+        block_outputs, tokens, output_depth = self.collect_block_query_tokens(
+            past,
+            images,
+            intent,
+        )
+        query = block_outputs[-1]
+        out = self.forward_from_planner_query_tok(query, past)
+        out["depth"] = output_depth
+        if return_block_tokens:
+            for block_idx, block_query in enumerate(block_outputs):
+                out[f"planner_query_tok_block_{block_idx}"] = block_query.squeeze(1)
+        return out
