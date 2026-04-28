@@ -190,20 +190,20 @@ if __name__ == "__main__":
         from loader import WaymoE2E
 
         train_dataset = WaymoE2E(
-            indexFile="index_train.pkl", data_dir=args.data_dir, n_items=250_000
+            indexFile="index_train.pkl", data_dir=args.data_dir, n_items=400_000
         )
         test_dataset = WaymoE2E(
-            indexFile="index_val.pkl", data_dir=args.data_dir, n_items=25_000
+            indexFile="index_val.pkl", data_dir=args.data_dir, n_items=40_000
         )
-        nw = 0
+        nw = 8
     elif args.dataset == "nuscenes":
         from nuscenes_loader import NuScenesDataset
 
         train_dataset = NuScenesDataset(
-            data_dir=args.data_dir, split="train", n_items=250_000
+            data_dir=args.data_dir, split="train", n_items=400_000
         )
         test_dataset = NuScenesDataset(
-            data_dir=args.data_dir, split="val", n_items=25_000
+            data_dir=args.data_dir, split="val", n_items=40_000
         )
         nw = 16
     elif args.dataset == "all":
@@ -265,7 +265,7 @@ if __name__ == "__main__":
             num_workers=nw,
             batch_sampler=train_batch_sampler,
             collate_fn=collate_with_images,
-            persistent_workers=False,
+            persistent_workers=(nw > 0),
             pin_memory=False,
         )
         val_loader = torch.utils.data.DataLoader(
@@ -273,7 +273,7 @@ if __name__ == "__main__":
             num_workers=nw,
             batch_sampler=val_batch_sampler,
             collate_fn=collate_with_images,
-            persistent_workers=False,
+            persistent_workers=(nw > 0),
             pin_memory=False,
         )
     else:
@@ -282,7 +282,7 @@ if __name__ == "__main__":
             batch_size=args.batch_size,
             num_workers=nw,
             collate_fn=collate_with_images,
-            persistent_workers=False,
+            persistent_workers=(nw > 0),
             pin_memory=False,
         )
         val_loader = torch.utils.data.DataLoader(
@@ -290,7 +290,7 @@ if __name__ == "__main__":
             batch_size=args.batch_size,
             num_workers=nw,
             collate_fn=collate_with_images,
-            persistent_workers=False,
+            persistent_workers=(nw > 0),
             pin_memory=False,
         )
 

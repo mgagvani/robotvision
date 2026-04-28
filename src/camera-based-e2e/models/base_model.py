@@ -77,6 +77,16 @@ class LitModel(pl.LightningModule):
             moved["IMAGES"] = self.decode_batch_jpeg(images_jpeg, device=device)
             return moved
 
+        if "IMAGES" in batch:
+            images = batch["IMAGES"]
+            rest = {k: v for k, v in batch.items() if k != "IMAGES"}
+            moved = super().transfer_batch_to_device(rest, device, dataloader_idx)
+            moved["IMAGES"] = [
+                img.to(device, non_blocking=True) if img is not None else None
+                for img in images
+            ]
+            return moved
+
         return super().transfer_batch_to_device(batch, device, dataloader_idx)
 
 
@@ -430,19 +440,32 @@ class LitModel(pl.LightningModule):
     def validation_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, "val")
     
-def collate_with_images(batch):
+def collate_with_images(batch, cam_idxs=(1,)):
+    """Collate that CPU-decodes requested cameras in the dataloader worker."""
     past = [torch.as_tensor(b["PAST"], dtype=torch.float32) for b in batch]
     future = [torch.as_tensor(b["FUTURE"], dtype=torch.float32) for b in batch]
     intent = torch.as_tensor([b["INTENT"] for b in batch])
     names = [b["NAME"] for b in batch]
 
-    cams = list(zip(*[b["IMAGES_JPEG"] for b in batch]))  # per-camera tuples
-    images_jpeg = [list(cam_imgs) for cam_imgs in cams]  # stay on CPU
+    num_cams = len(batch[0]["IMAGES_JPEG"])
+    images = [None] * num_cams
+    for cam_idx in cam_idxs:
+        jpegs = [
+            b["IMAGES_JPEG"][cam_idx] if isinstance(b["IMAGES_JPEG"][cam_idx], torch.Tensor)
+            else torch.frombuffer(bytearray(b["IMAGES_JPEG"][cam_idx]), dtype=torch.uint8)
+            for b in batch
+        ]
+        decoded = torchvision.io.decode_jpeg(
+            jpegs,
+            mode=torchvision.io.ImageReadMode.UNCHANGED,
+            device="cpu",
+        )
+        images[cam_idx] = torch.stack(decoded, dim=0)
 
     return {
         "PAST": torch.stack(past, dim=0),
         "FUTURE": torch.stack(future, dim=0),
         "INTENT": intent,
-        "IMAGES_JPEG": images_jpeg,
+        "IMAGES": images,
         "NAME": names,
     }
