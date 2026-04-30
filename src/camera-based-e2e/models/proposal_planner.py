@@ -5,6 +5,7 @@ Pipeline:
   scene encoder → proposal init → iterative refinement → scorer
                                   (with intermediate proposal supervision)
 """
+from dataclasses import dataclass
 from typing import Dict, List
 
 import torch
@@ -14,6 +15,37 @@ from .scene_encoder import SceneEncoder
 from .proposal_init import ProposalInit
 from .refinement import Refinement
 from .scorer import Scorer
+
+
+@dataclass
+class IPadConfig:
+    """Loss / scorer hyperparameters for the iPad-style ProposalPlanner.
+
+    Bundled here so the LitModel only needs a single config argument instead of
+    a long list of keyword args. Defaults match the original LitModel signature.
+    """
+
+    # Loss weights
+    rfs_weight: float = 0.0
+    smoothness_weight: float = 0.0
+    collision_weight: float = 0.0
+    comfort_weight: float = 0.0
+    diversity_weight: float = 0.0
+
+    # Scorer
+    score_weight: float = 1.0
+    score_warmup_epochs: int = 2
+    score_temperature: float = 5.0
+    score_loss_type: str = "bce"      # bce | ce | bce_pairwise | listnet
+    score_target_type: str = "l1"     # l1 | navsim | rfs
+    score_rank_weight: float = 0.0
+    score_margin: float = 0.2
+    score_topk: int = 0
+
+    # Misc
+    comfort_jerk_threshold: float = 5.0
+    prev_weight: float = 0.1
+    rfs_target_use_comfort: bool = True
 
 
 class ProposalPlanner(nn.Module):

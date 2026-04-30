@@ -1,3 +1,4 @@
+from dataclasses import asdict
 from typing import List, Optional
 import torch
 import torch.nn as nn
@@ -6,6 +7,7 @@ import pytorch_lightning as pl
 import torchvision
 
 from .losses.depth_loss import DepthLoss
+from .proposal_planner import IPadConfig
 
 class BaseModel(nn.Module):
     def __init__(self, in_dim, out_dim):
@@ -27,43 +29,16 @@ class LitModel(pl.LightningModule):
         model: nn.Module,
         lr: float,
         lr_vision: Optional[float] = None,
-        rfs_weight: float = 0.0,
-        smoothness_weight: float = 0.0,
-        collision_weight: float = 0.0,
-        comfort_weight: float = 0.0,
-        diversity_weight: float = 0.0,
-        score_weight: float = 1.0,
-        score_warmup_epochs: int = 2,
-        score_temperature: float = 5.0,
-        score_loss_type: str = "bce",
-        score_target_type: str = "l1",
-        score_rank_weight: float = 0.0,
-        score_margin: float = 0.2,
-        score_topk: int = 0,
-        comfort_jerk_threshold: float = 5.0,
-        prev_weight: float = 0.1,
-        rfs_target_use_comfort: bool = True,
+        ipad_config: Optional[IPadConfig] = None,
     ):
         super(LitModel, self).__init__()
         self.model = model
         self.hparams.lr = lr
         self.hparams.lr_vision = lr_vision
-        self.hparams.rfs_weight = rfs_weight
-        self.hparams.smoothness_weight = smoothness_weight
-        self.hparams.collision_weight = collision_weight
-        self.hparams.comfort_weight = comfort_weight
-        self.hparams.diversity_weight = diversity_weight
-        self.hparams.score_weight = score_weight
-        self.hparams.score_warmup_epochs = score_warmup_epochs
-        self.hparams.score_temperature = score_temperature
-        self.hparams.score_loss_type = score_loss_type
-        self.hparams.score_target_type = score_target_type
-        self.hparams.score_rank_weight = score_rank_weight
-        self.hparams.score_margin = score_margin
-        self.hparams.score_topk = score_topk
-        self.hparams.comfort_jerk_threshold = comfort_jerk_threshold
-        self.hparams.prev_weight = prev_weight
-        self.hparams.rfs_target_use_comfort = rfs_target_use_comfort
+
+        cfg = ipad_config if ipad_config is not None else IPadConfig()
+        for field, value in asdict(cfg).items():
+            setattr(self.hparams, field, value)
 
         self.example_input_array = ({
             'PAST': torch.zeros((1, 16, 6)),  # PAST
@@ -355,11 +330,11 @@ class LitModel(pl.LightningModule):
     def _shared_step(self, batch: torch.Tensor, stage: str) -> torch.Tensor:
         past, future, intent = batch['PAST'], batch['FUTURE'], batch['INTENT']
 
-        if "IMAGES_JPEG" in batch:
+        if "IMAGES" in batch:
+            images = batch["IMAGES"]
+        elif "IMAGES_JPEG" in batch:
             images_jpeg = batch["IMAGES_JPEG"]
             images = self.decode_batch_jpeg(images_jpeg)
-        elif "IMAGES" in batch:
-            images = batch["IMAGES"]
         else:
             raise KeyError("Batch must contain either 'IMAGES_JPEG' or 'IMAGES' key.")
 

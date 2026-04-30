@@ -18,9 +18,8 @@ from loader import WaymoE2E
 # Replace with your model defined in models/ 
 from models.base_model import LitModel, collate_with_images
 from models.monocular import DeepMonocularModel
-from models.proposal_planner import ProposalPlanner
+from models.proposal_planner import ProposalPlanner, IPadConfig
 from models.feature_extractors import SAMFeatures, DINOFeatures, ResNetFeatures
-from models.debug_callbacks import GradientDebugCallback
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -71,8 +70,6 @@ if __name__ == "__main__":
     parser.add_argument('--no_wandb', action='store_true', help='Disable wandb logging (use CSV only)')
     parser.add_argument('--compile', action='store_true', help='Whether to compile the model with torch.compile')
     parser.add_argument('--profile', action='store_true', help='Whether to run the profiler')
-    parser.add_argument('--debug', action='store_true', help='Enable debug visualizations (gradient norms, activation stats, proposal diagnostics)')
-    parser.add_argument('--debug_log_every', type=int, default=10, help='How often (steps) to log debug metrics')
     args = parser.parse_args()
 
     # Data 
@@ -106,30 +103,36 @@ if __name__ == "__main__":
             else SAMFeatures(frozen=True)
         )
         model = DeepMonocularModel(feature_extractor=backbone, out_dim=out_dim, n_blocks=8)
-    if args.debug:
-        model._debug = True
 
     if args.compile:
         model = torch.compile(model, mode="max-autotune")
+
+    if args.model_type == 'proposal':
+        ipad_config = IPadConfig(
+            rfs_weight=args.rfs_weight,
+            smoothness_weight=args.smoothness_weight,
+            collision_weight=args.collision_weight,
+            comfort_weight=args.comfort_weight,
+            diversity_weight=args.diversity_weight,
+            score_weight=args.score_weight,
+            score_warmup_epochs=args.score_warmup_epochs,
+            score_temperature=args.score_temperature,
+            score_loss_type=args.score_loss_type,
+            score_target_type=args.score_target_type,
+            score_rank_weight=args.score_rank_weight,
+            score_margin=args.score_margin,
+            score_topk=args.score_topk,
+            comfort_jerk_threshold=args.comfort_jerk_threshold,
+            prev_weight=args.prev_weight,
+            rfs_target_use_comfort=not args.no_rfs_target_comfort,
+        )
+    else:
+        ipad_config = None
+
     lit_model = LitModel(
         model=model,
         lr=args.lr,
-        smoothness_weight=args.smoothness_weight if args.model_type == 'proposal' else 0.0,
-        collision_weight=args.collision_weight if args.model_type == 'proposal' else 0.0,
-        comfort_weight=args.comfort_weight if args.model_type == 'proposal' else 0.0,
-        rfs_weight=args.rfs_weight if args.model_type == 'proposal' else 0.0,
-        diversity_weight=args.diversity_weight if args.model_type == 'proposal' else 0.0,
-        score_weight=args.score_weight if args.model_type == 'proposal' else 0.0,
-        score_warmup_epochs=args.score_warmup_epochs if args.model_type == 'proposal' else 0,
-        score_temperature=args.score_temperature if args.model_type == 'proposal' else 5.0,
-        score_loss_type=args.score_loss_type if args.model_type == 'proposal' else 'bce',
-        score_target_type=args.score_target_type if args.model_type == 'proposal' else 'l1',
-        score_rank_weight=args.score_rank_weight if args.model_type == 'proposal' else 0.0,
-        score_margin=args.score_margin if args.model_type == 'proposal' else 0.2,
-        score_topk=args.score_topk if args.model_type == 'proposal' else 0,
-        comfort_jerk_threshold=args.comfort_jerk_threshold if args.model_type == 'proposal' else 5.0,
-        prev_weight=args.prev_weight if args.model_type == 'proposal' else 0.1,
-        rfs_target_use_comfort=not args.no_rfs_target_comfort if args.model_type == 'proposal' else True,
+        ipad_config=ipad_config,
     )
 
     # We don't want to save logs or checkpoints in the home directory - it'll fill up fast
@@ -150,8 +153,6 @@ if __name__ == "__main__":
                          filename='camera-e2e-{epoch:02d}-{val_loss:.2f}'
                         ),
     ]
-    if args.debug:
-        callbacks.append(GradientDebugCallback(log_every=args.debug_log_every))
 
     trainer = pl.Trainer(
         max_epochs=args.max_epochs,
@@ -187,38 +188,5 @@ if __name__ == "__main__":
         plt.savefig(out / "loss.png", dpi=200)
     except Exception as e:
         print(f"Could not save loss plot: {e}")
-
-    if args.debug:
-        try:
-            from debug_viz import find_metrics_csv, load_and_merge
-            from debug_viz import (
-                plot_gradient_norms_by_module, plot_gradient_norms_refinement,
-                plot_gradient_norms_scorer_propinit, plot_gradient_dominance,
-                plot_activation_stats, plot_proposal_diagnostics,
-                plot_loss_breakdown, plot_ade_regret, plot_param_norms,
-                plot_summary_dashboard,
-            )
-            csv_path = find_metrics_csv(run_dir / "version_0")
-            df = load_and_merge(csv_path)
-            debug_out = base_path / "debug_plots"
-            debug_out.mkdir(parents=True, exist_ok=True)
-            print(f"\nGenerating debug plots to {debug_out} ...")
-            plot_gradient_norms_by_module(df, debug_out)
-            plot_gradient_norms_refinement(df, debug_out)
-            plot_gradient_norms_scorer_propinit(df, debug_out)
-            plot_gradient_dominance(df, debug_out)
-            plot_activation_stats(df, debug_out)
-            plot_proposal_diagnostics(df, debug_out)
-            plot_loss_breakdown(df, debug_out)
-            plot_ade_regret(df, debug_out)
-            plot_param_norms(df, debug_out)
-            plot_summary_dashboard(df, debug_out)
-            print(f"Debug plots saved to {debug_out}")
-        except Exception as e:
-            print(f"Could not generate debug plots: {e}")
-
-
-
-
 
     
