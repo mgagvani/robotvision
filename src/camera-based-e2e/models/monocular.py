@@ -163,16 +163,21 @@ class DeepMonocularModel(nn.Module):
         # Doesn't need no_grad b/c DINO/SAMFeatures will freeze if needed
         feats_vit = self.features(front_cam)  # list or tensor
 
-        if isinstance(feats_vit, (list, tuple)):
-            if len(feats_vit) != 1:
-                raise ValueError(f"Expected single feature map, got {len(feats_vit)}")
+        if len(feats_vit) == 1 and isinstance(feats_vit, list):
             feats_vit = feats_vit[0]
+
         feats = self.visual_adapter(feats_vit)  # (B, C, H, W)
 
         # Depth Supervision
         output_depth = F.softplus(self.depth_gen(feats).squeeze(1))  # (B, 128, 128)
 
-        tokens = feats.flatten(2).permute(0, 2, 1) + self.positional_encoding # (B, N, C_total)
+        # tokens: handle list of features or single tensor
+        # TODO: is this made redundant by if statement above?
+        if isinstance(feats, (list, tuple)):
+            tokens = torch.cat([f.flatten(2) for f in feats], dim=1)  # (B, C_total, N)
+        else:
+            tokens = feats.flatten(2)  # (B, C, N)
+        tokens = torch.permute(tokens, (0, 2, 1)) + self.positional_encoding # (B, N, C_total)
         
         # copy procedure to build query_0 from MonocularModel
         intent_onehot = F.one_hot((intent - 1).long(), num_classes=3).float()

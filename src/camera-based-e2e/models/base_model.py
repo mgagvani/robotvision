@@ -367,13 +367,18 @@ class LitModel(pl.LightningModule):
 
         raw_output = self.forward(model_inputs)
         pred_depth = None
-        pred_scores = None
+        pred_scores: torch.Tensor = None
+        pred_traj_flat: torch.Tensor = None
+        query_for_score: torch.Tensor = None
         proposal_list = None
         if isinstance(raw_output, dict):
-            proposal_list = raw_output.get("proposal_list", None)
-            pred_scores = raw_output.get("scores", None)
-            pred_depth = raw_output.get("depth", None)
-            pred_future = raw_output["trajectory"]
+            outputs = raw_output
+            proposal_list = outputs.get("proposal_list", None)
+            pred_scores = outputs.get("scores", None)
+            pred_depth = outputs.get("depth", None)
+            pred_traj_flat = outputs.get("trajectory_flat", None)
+            query_for_score = outputs.get("query_for_score", None)
+            pred_future = outputs["trajectory"]
         else:
             pred_future = raw_output
 
@@ -383,14 +388,14 @@ class LitModel(pl.LightningModule):
         k_modes = self.model.n_proposals if hasattr(self.model, "n_proposals") else 1
 
         if pred.ndim != 2:
-            raise ValueError(f"Unexpected pred shape {pred.shape}")
+            raise ValueError(f"Unexpected pred shape {pred.shape}; expected (B, T*2) or (B, {k_modes}*T*2).")
 
         if pred.shape[1] == t2:
             pred = pred.view(pred.size(0), 1, t_steps, 2)
         elif pred.shape[1] == k_modes * t2:
             pred = pred.view(pred.size(0), k_modes, t_steps, 2)
         else:
-            raise ValueError(f"Unexpected pred shape {pred.shape}")
+            raise ValueError(f"Unexpected pred shape {pred.shape}; expected (B, T*2) or (B, {k_modes}*T*2).")
 
         if not torch.isfinite(pred).all():
             pred = torch.nan_to_num(pred, nan=0.0, posinf=1e3, neginf=-1e3)
