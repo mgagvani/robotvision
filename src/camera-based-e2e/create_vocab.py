@@ -13,8 +13,8 @@ sns.set_style("ticks")
 def get_all_trajectories():
     # Instantiate dataloader w/ n_items None to get everything
     dataset = WaymoE2E(indexFile='index_train.pkl', 
-                       data_dir='/anvil/scratch/x-mgagvani/wod/waymo_end_to_end_camera_v1_0_0/waymo_open_dataset_end_to_end_camera_v_1_0_0', 
-                       n_items=None # set to None eventually,
+                       data_dir='/anvil/scratch/x-mgagvani/wod/waymo_end_to_end_camera_v1_0_0/waymo_open_dataset_end_to_end_camera_v_1_0_0',
+                       n_items=None  # set to None eventually
                        )
 
     dataloader = DataLoader(dataset, batch_size=512, num_workers=0, collate_fn=collate_with_images, pin_memory=True)
