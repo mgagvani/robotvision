@@ -13,6 +13,7 @@ from tqdm.contrib.concurrent import process_map
 import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 from protos import dataset_pb2, e2e_pb2, map_pb2
+from utils.scene_labels import infer_scene_type
 
 
 def safe_name(name: str) -> str:
@@ -158,6 +159,7 @@ def export_frame(
 ) -> Dict[str, object]:
     raw_id = frame.frame.context.name or f"idx_{global_index}"
     sample_id = make_sample_id(raw_id, global_index, cfg["id_mode"], id_counts)
+    scene_type = infer_scene_type(cfg["data_dir"], filename)
 
     samples_dir: Path = cfg["samples_dir"]
     split_dir: Path = cfg["split_dir"]
@@ -218,6 +220,7 @@ def export_frame(
 
     meta = {
         "id": sample_id,
+        "scene_type": scene_type,
         "context_name": frame.frame.context.name,
         "timestamp_micros": frame.frame.timestamp_micros,
         "intent": {"id": frame.intent, "name": intent_name(frame.intent)},
@@ -254,6 +257,7 @@ def export_frame(
     rel_sample_dir = sample_dir.relative_to(split_dir)
     entry = {
         "id": sample_id,
+        "scene_type": scene_type,
         "sample_dir": rel_sample_dir.as_posix(),
         "state": str(state_path.relative_to(split_dir)),
         "meta": str(meta_path.relative_to(split_dir)),

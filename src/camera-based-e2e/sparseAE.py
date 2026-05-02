@@ -83,7 +83,7 @@ class SparseAE(pl.LightningModule):
         # Store activations from the base model
         self.internal_acts = output.detach()
 
-    def _camera_major_to_batch_major(self, images_jpeg):
+    def _camera_major_to_batch_major(self, images_jpeg, expected_batch_size=None):
         if not isinstance(images_jpeg, (list, tuple)):
             return images_jpeg
         if len(images_jpeg) == 0:
@@ -91,11 +91,17 @@ class SparseAE(pl.LightningModule):
         if isinstance(images_jpeg[0], torch.Tensor):
             return [list(images_jpeg)]
 
-        # base_model.collate_with_images returns camera-major:
-        # outer=list of cameras, inner=list over batch.
         first = images_jpeg[0]
         if not isinstance(first, (list, tuple)):
             return images_jpeg
+
+        if expected_batch_size is not None and len(images_jpeg) == expected_batch_size:
+            return [list(sample) for sample in images_jpeg]
+
+        # Backward compatibility for older camera-major batches:
+        # outer=list of cameras, inner=list over batch.
+        if expected_batch_size is not None and len(first) != expected_batch_size:
+            return [list(sample) for sample in images_jpeg]
 
         batch_size = len(first)
         if batch_size == 0:
@@ -111,7 +117,13 @@ class SparseAE(pl.LightningModule):
             return super().transfer_batch_to_device(batch, device, dataloader_idx)
 
         if "IMAGES_JPEG" in batch:
-            images_jpeg = self._camera_major_to_batch_major(batch["IMAGES_JPEG"])
+            expected_batch_size = None
+            if isinstance(batch.get("PAST"), torch.Tensor):
+                expected_batch_size = batch["PAST"].size(0)
+            images_jpeg = self._camera_major_to_batch_major(
+                batch["IMAGES_JPEG"],
+                expected_batch_size=expected_batch_size,
+            )
             batch_wo_jpeg = dict(batch)
             batch_wo_jpeg.pop("IMAGES_JPEG", None)
             moved = super().transfer_batch_to_device(batch_wo_jpeg, device, dataloader_idx)
@@ -134,7 +146,10 @@ class SparseAE(pl.LightningModule):
         if "IMAGES" in batch:
             images = [img.to(device=device) for img in batch["IMAGES"]]
         else:
-            images_jpeg = self._camera_major_to_batch_major(batch["IMAGES_JPEG"])
+            images_jpeg = self._camera_major_to_batch_major(
+                batch["IMAGES_JPEG"],
+                expected_batch_size=past.size(0),
+            )
             images = self.target_model.decode_batch_jpeg(images_jpeg, device=device)
             
         model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent}

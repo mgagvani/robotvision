@@ -56,13 +56,32 @@ CAMERA_SLOT_TO_PROTO_NAME = {
 def select_best_trajectory(output: dict) -> torch.Tensor:
     pred = output["trajectory"]
     scores = output.get("scores", None)
-    bsz = pred.size(0)
-    pred = pred.view(bsz, -1, pred.size(-2), 2)
-    if scores is not None and pred.size(1) > 1:
+    if pred.ndim == 4 and pred.size(-1) == 2:
+        traj = pred
+    elif pred.ndim == 3 and pred.size(-1) == 2:
+        traj = pred.unsqueeze(1)
+    elif pred.ndim == 2:
+        bsz = pred.size(0)
+        n_modes = int(scores.size(1)) if scores is not None and scores.ndim == 2 else 1
+        if pred.size(1) % max(n_modes, 1) != 0:
+            raise RuntimeError(
+                f"Cannot reshape flat trajectory output of shape {tuple(pred.shape)} "
+                f"using n_modes={n_modes}"
+            )
+        mode_dim = pred.size(1) // max(n_modes, 1)
+        if mode_dim % 2 != 0:
+            raise RuntimeError(
+                f"Flat trajectory dimension {pred.size(1)} is not compatible with "
+                f"n_modes={n_modes} and xy waypoints"
+            )
+        traj = pred.view(bsz, n_modes, mode_dim // 2, 2)
+    else:
+        raise RuntimeError(f"Unsupported trajectory output shape: {tuple(pred.shape)}")
+    if scores is not None and traj.size(1) > 1:
         best_idx = scores.argmin(dim=1)
     else:
-        best_idx = torch.zeros(bsz, dtype=torch.long, device=pred.device)
-    return pred[torch.arange(bsz, device=pred.device), best_idx]
+        best_idx = torch.zeros(traj.size(0), dtype=torch.long, device=traj.device)
+    return traj[torch.arange(traj.size(0), device=traj.device), best_idx]
 
 
 def prepare_model_and_sae(model_checkpoint_path: str, sae_checkpoint_path: str, block_idx: int, device: torch.device):

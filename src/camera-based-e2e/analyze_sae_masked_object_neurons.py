@@ -13,17 +13,14 @@ import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
 
 from analyze_sae_object_neurons import (
-    compute_hidden_activations,
     default_index_file,
-    get_sae_state_dict,
     load_detection_artifacts,
     resolve_object_label,
 )
 from loader import WaymoE2E, collate_with_images
 from models.base_model import LitModel
-from models.feature_extractors import SAMFeatures
-from models.monocular import DeepMonocularModel
-from sparseAE import SparseAE
+from models.sae import SparseAutoencoder
+from new_sae_utils import compute_hidden_activations, load_model_and_sae as load_lit_model_and_sae
 
 try:
     mp.set_sharing_strategy("file_system")
@@ -77,13 +74,32 @@ def resolve_object_labels_multi(
 def select_best_trajectory(output: dict) -> torch.Tensor:
     pred = output["trajectory"]
     scores = output.get("scores", None)
-    bsz = pred.size(0)
-    pred = pred.view(bsz, -1, pred.size(-2), 2)
-    if scores is not None and pred.size(1) > 1:
+    if pred.ndim == 4 and pred.size(-1) == 2:
+        traj = pred
+    elif pred.ndim == 3 and pred.size(-1) == 2:
+        traj = pred.unsqueeze(1)
+    elif pred.ndim == 2:
+        bsz = pred.size(0)
+        n_modes = int(scores.size(1)) if scores is not None and scores.ndim == 2 else 1
+        if pred.size(1) % max(n_modes, 1) != 0:
+            raise RuntimeError(
+                f"Cannot reshape flat trajectory output of shape {tuple(pred.shape)} "
+                f"using n_modes={n_modes}"
+            )
+        mode_dim = pred.size(1) // max(n_modes, 1)
+        if mode_dim % 2 != 0:
+            raise RuntimeError(
+                f"Flat trajectory dimension {pred.size(1)} is not compatible with "
+                f"n_modes={n_modes} and xy waypoints"
+            )
+        traj = pred.view(bsz, n_modes, mode_dim // 2, 2)
+    else:
+        raise RuntimeError(f"Unsupported trajectory output shape: {tuple(pred.shape)}")
+    if scores is not None and traj.size(1) > 1:
         best_idx = scores.argmin(dim=1)
     else:
-        best_idx = torch.zeros(bsz, dtype=torch.long, device=pred.device)
-    return pred[torch.arange(bsz, device=pred.device), best_idx]
+        best_idx = torch.zeros(traj.size(0), dtype=torch.long, device=traj.device)
+    return traj[torch.arange(traj.size(0), device=traj.device), best_idx]
 
 
 def prepare_model_and_sae(
@@ -92,33 +108,15 @@ def prepare_model_and_sae(
     block_idx: int,
     device: torch.device,
 ):
-    submodel = DeepMonocularModel(
-        feature_extractor=SAMFeatures(
-            model_name="timm/vit_pe_spatial_small_patch16_512.fb", frozen=True
-        ),
-        out_dim=40,
-        n_blocks=4,
+    model, sae, capture, resolved_sae_checkpoint_path = load_lit_model_and_sae(
+        model_checkpoint_path=model_checkpoint_path,
+        sae_checkpoint_path=sae_checkpoint_path,
+        block_idx=block_idx,
+        device=device,
     )
-    model = LitModel.load_from_checkpoint(model_checkpoint_path, model=submodel)
-    model = model.to(device)
-    model.eval()
-
-    target_layer = model.model.blocks[block_idx].mlp[2]
-    sae_checkpoint = torch.load(sae_checkpoint_path, map_location="cpu")
-    sae_state = get_sae_state_dict(sae_checkpoint)
-    encoder_weight = sae_state["encoder.weight"]
-    dict_size, input_dim = encoder_weight.shape
-    sae = SparseAE.build_from_state_dict(
-        sae_state,
-        target_model=model,
-        input_dim=input_dim,
-        dict_size=dict_size,
-        compile_sae=False,
-    )
-    sae = sae.to(device)
-    sae.eval()
-    target_layer.register_forward_hook(sae.hook_fn)
-    return model, sae, dict_size
+    sae._activation_capture = capture
+    sae._resolved_checkpoint_path = str(resolved_sae_checkpoint_path)
+    return model, sae, sae.latent_dim
 
 
 def filter_detection_matches(
@@ -246,16 +244,19 @@ def apply_detection_masks(
 
 def run_model_hidden_and_trajectory(
     model: LitModel,
-    sae: SparseAE,
+    sae: SparseAutoencoder,
     past: torch.Tensor,
     intent: torch.Tensor,
     images: Sequence[torch.Tensor],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    sae.internal_acts = None
+    capture = getattr(sae, "_activation_capture", None)
+    if capture is None:
+        raise RuntimeError("SAE activation capture hook is not attached")
+    capture.clear()
     outputs = model({"PAST": past, "IMAGES": images, "INTENT": intent})
-    if sae.internal_acts is None:
+    if capture.activations is None:
         raise RuntimeError("No activations captured from target model hook")
-    hidden = compute_hidden_activations(sae, sae.internal_acts).detach().cpu().to(torch.float64)
+    hidden = compute_hidden_activations(sae, capture.activations).detach().cpu().to(torch.float64)
     trajectory = select_best_trajectory(outputs).detach().cpu()
     return hidden, trajectory
 
@@ -304,7 +305,7 @@ def summarize_masking_effects(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--detections", type=str, required=True, help="Glob or path for saved detection artifacts")
-    parser.add_argument("--sae_checkpoint_path", type=str, required=True, help="Trained SparseAE checkpoint")
+    parser.add_argument("--sae_checkpoint_path", type=str, required=True, help="SAE checkpoint .pt, extracted directory, or sae_checkpoints.tar.gz archive")
     parser.add_argument("--data_dir", type=str, required=True, help="Waymo dataset directory")
     parser.add_argument(
         "--object_names",
@@ -325,7 +326,7 @@ def main():
     parser.add_argument("--n_items", type=int, default=None, help="Number of frames from the head of the split")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_workers", type=int, default=8)
-    parser.add_argument("--block_idx", type=int, default=3, help="Transformer block index whose mlp[2] is SAE-modeled")
+    parser.add_argument("--block_idx", type=int, default=3, help="Transformer block index whose output query state is SAE-modeled")
     parser.add_argument("--score_thresh", type=float, default=0.4, help="Detection score threshold for masking")
     parser.add_argument("--camera_indices", type=str, default="1", help="Comma-separated camera subset to mask")
     parser.add_argument("--device", type=str, default="cuda")

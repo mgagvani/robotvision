@@ -17,14 +17,23 @@ import torchvision
 
 def decode_batch_jpeg(images_jpeg: list[list[torch.Tensor]], device: torch.device) -> list[torch.Tensor]:
     """Decode batched JPEG bytes into per-camera tensors on device."""
+    if not isinstance(images_jpeg, (list, tuple)) or len(images_jpeg) == 0:
+        raise RuntimeError("Expected a non-empty batch-major list of JPEG tensors")
+
+    if isinstance(images_jpeg[0], torch.Tensor):
+        images_jpeg = [list(images_jpeg)]
+
+    batch_size = len(images_jpeg)
+    num_cams = max(len(sample) for sample in images_jpeg)
+
     flat_encoded = []
-    cam_sizes = []
-    for cam in images_jpeg:
-        cam_sizes.append(len(cam))
-        flat_encoded.extend(
-            jpg if isinstance(jpg, torch.Tensor) else torch.frombuffer(memoryview(jpg), dtype=torch.uint8)
-            for jpg in cam
-        )
+    meta = []
+    for sample_idx, sample in enumerate(images_jpeg):
+        for cam_idx, jpg in enumerate(sample):
+            flat_encoded.append(
+                jpg if isinstance(jpg, torch.Tensor) else torch.frombuffer(memoryview(jpg), dtype=torch.uint8)
+            )
+            meta.append((sample_idx, cam_idx))
 
     flat_decoded = torchvision.io.decode_jpeg(
         flat_encoded,
@@ -32,12 +41,34 @@ def decode_batch_jpeg(images_jpeg: list[list[torch.Tensor]], device: torch.devic
         device=device,
     )
 
+    per_cam = [[None] * batch_size for _ in range(num_cams)]
+    for decoded, (sample_idx, cam_idx) in zip(flat_decoded, meta):
+        per_cam[cam_idx][sample_idx] = decoded
+
     out = []
-    idx = 0
-    for n in cam_sizes:
-        cam_list = flat_decoded[idx:idx + n]
-        idx += n
-        out.append(torch.stack(cam_list, dim=0))
+    for cam_list in per_cam:
+        valid = [img for img in cam_list if img is not None]
+        if not valid:
+            out.append(torch.empty((0, 3, 0, 0), device=device))
+            continue
+
+        max_h = max(img.shape[1] for img in valid)
+        max_w = max(img.shape[2] for img in valid)
+        padded = []
+        for img in cam_list:
+            if img is None:
+                padded.append(torch.zeros((3, max_h, max_w), device=device, dtype=valid[0].dtype))
+                continue
+
+            if img.shape[0] == 1:
+                img = img.repeat(3, 1, 1)
+            elif img.shape[0] >= 4:
+                img = img[:3]
+
+            _, h, w = img.shape
+            pad = (0, max_w - w, 0, max_h - h)
+            padded.append(F.pad(img, pad, mode="constant", value=0) if pad != (0, 0, 0, 0) else img)
+        out.append(torch.stack(padded, dim=0))
     return out
 
 def load_model(checkpoint_path: str, device: torch.device = None) -> DeepMonocularModel:
@@ -201,5 +232,4 @@ if __name__ == "__main__":
 
     # Serialize and save submission
     serialize_and_save_submission(predictions, args.output_file)
-
 

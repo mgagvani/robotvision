@@ -10,6 +10,13 @@ viz_perception
 *.npy
 *.ckpt
 *.sbatch
+*.png
+*.json
+*.pt
+*.tar.gz
+*.jpg
+*.pkl
+*.csv
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

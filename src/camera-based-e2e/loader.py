@@ -63,6 +63,7 @@ class WaymoE2E(Dataset):
             start = rng.randint(0, total - n_items)
             self.indexes = self.indexes[start : start + n_items]
 
+
     def __len__(self):
         return len(self.indexes)
 
@@ -110,7 +111,14 @@ class WaymoE2E(Dataset):
             for img in frame.frame.images
         ]
 
-        return {'PAST': past, 'FUTURE': future, 'IMAGES_JPEG': jpeg_tensors, 'INTENT': frame.intent, 'NAME': name}
+        item = {
+            'PAST': past,
+            'FUTURE': future,
+            'IMAGES_JPEG': jpeg_tensors,
+            'INTENT': frame.intent,
+            'NAME': name,
+        }
+        return item
 
 
 def collate_with_images(batch):

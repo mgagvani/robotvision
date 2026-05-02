@@ -20,8 +20,13 @@ from torch.utils.data import DataLoader
 
 from loader import WaymoE2E
 from models.base_model import LitModel, collate_with_images
-from models.feature_extractors import SAMFeatures
-from models.monocular import DeepMonocularModel
+from sae_utils import (
+    compute_hidden_activations,
+    freeze_module,
+    get_sae_state_dict,
+    load_model_and_sae,
+    set_eval_mode,
+)
 from sparseAE import SparseAE
 
 DEFAULT_TRAIN_SPLIT = "train"
@@ -43,20 +48,22 @@ SCORE_METRIC_NAMES = {
 
 
 def default_num_workers() -> int:
-    return os.cpu_count() or 1
+    candidates: list[int] = []
+    for env_name in ("SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE"):
+        env_value = os.environ.get(env_name)
+        if env_value is not None:
+            try:
+                candidates.append(int(env_value))
+            except ValueError:
+                pass
+    if hasattr(os, "sched_getaffinity"):
+        candidates.append(len(os.sched_getaffinity(0)))
+    candidates.append(os.cpu_count() or 1)
+    return max(1, min(candidates))
+
 
 def default_index_file(split: str) -> str:
     return INDEX_FILES.get(split, INDEX_FILES[DEFAULT_TRAIN_SPLIT])
-
-
-def freeze_module(module: nn.Module) -> None:
-    for param in module.parameters():
-        param.requires_grad = False
-
-
-def set_eval_mode(*modules: nn.Module) -> None:
-    for module in modules:
-        module.eval()
 
 
 def checkpoint_value(checkpoint: dict[str, Any], key: str) -> Any:
@@ -124,71 +131,6 @@ def build_train_val_loaders(
             shuffle=False,
         ),
     )
-
-
-def get_sae_state_dict(checkpoint_obj: Any) -> dict[str, torch.Tensor]:
-    if isinstance(checkpoint_obj, dict) and "state_dict" in checkpoint_obj:
-        checkpoint_obj = checkpoint_obj["state_dict"]
-    if not isinstance(checkpoint_obj, dict):
-        raise TypeError("Unsupported SAE checkpoint format")
-    return checkpoint_obj
-
-
-def compute_hidden_activations(sae: SparseAE, hooked_acts: torch.Tensor) -> torch.Tensor:
-    hidden = torch.relu(sae.encoder(hooked_acts - sae.decoder.bias))
-    return hidden.flatten(start_dim=1)
-
-
-def build_default_backbone() -> DeepMonocularModel:
-    return DeepMonocularModel(
-        feature_extractor=SAMFeatures(
-            model_name="timm/vit_pe_spatial_small_patch16_512.fb",
-            frozen=True,
-        ),
-        out_dim=40,
-        n_blocks=4,
-    )
-
-
-def build_default_lit_model(model_checkpoint_path: str) -> LitModel:
-    model = LitModel.load_from_checkpoint(
-        model_checkpoint_path,
-        model=build_default_backbone(),
-        map_location="cpu",
-    )
-    model.eval()
-    return model
-
-
-def load_model_and_sae(
-    model_checkpoint_path: str,
-    sae_checkpoint_path: str,
-    block_idx: int,
-    device: torch.device | None = None,
-) -> tuple[LitModel, SparseAE, Any]:
-    model = build_default_lit_model(model_checkpoint_path)
-    target_layer = model.model.blocks[block_idx].mlp[2]
-
-    sae_checkpoint = torch.load(sae_checkpoint_path, map_location="cpu")
-    sae_state = get_sae_state_dict(sae_checkpoint)
-    encoder_weight = sae_state["encoder.weight"]
-    dict_size, input_dim = encoder_weight.shape
-
-    sae = SparseAE.build_from_state_dict(
-        sae_state,
-        target_model=model,
-        input_dim=input_dim,
-        dict_size=dict_size,
-        compile_sae=False,
-    )
-    sae.eval()
-    hook_handle = target_layer.register_forward_hook(sae.hook_fn)
-
-    if device is not None:
-        model = model.to(device)
-        sae = sae.to(device)
-
-    return model, sae, hook_handle
 
 
 def extract_batch_targets(
@@ -579,7 +521,7 @@ def load_residual_model(
     checkpoint_path: str,
     device: torch.device,
 ) -> tuple[SAEScorerResidual, dict[str, Any]]:
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
     if "model_state_dict" in checkpoint:
         model = build_residual_model_from_metadata(checkpoint, device=device)
@@ -708,7 +650,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train_items", type=int, default=250_000)
     parser.add_argument("--val_items", type=int, default=25_000)
     parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--num_workers", type=int, default=default_num_workers())
+    parser.add_argument("--num_workers", type=int, default=14)
     parser.add_argument("--block_idx", type=int, default=3)
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -750,20 +692,20 @@ def export_best_residual_checkpoint(
     args: dict[str, Any],
     best_metric: float,
 ) -> None:
-    best_module = LitSAEScorerResidual.load_from_checkpoint(lightning_checkpoint_path)
-    try:
-        save_residual_model(
-            output_path,
-            best_module.residual_model,
-            sae_dim=best_module.sae_dim,
-            traj_dim=best_module.traj_dim,
-            hidden_dim=best_module.hparams.hidden_dim,
-            dropout=best_module.hparams.dropout,
-            best_metric=best_metric,
-            args=args,
-        )
-    finally:
-        best_module.remove_hook()
+    checkpoint = torch.load(lightning_checkpoint_path, map_location="cpu", weights_only=False)
+    residual_state, metadata = _load_residual_state_from_lightning_checkpoint(checkpoint)
+    residual_model = build_residual_model_from_metadata(metadata, device=torch.device("cpu"))
+    residual_model.load_state_dict(residual_state, strict=True)
+    save_residual_model(
+        output_path,
+        residual_model,
+        sae_dim=metadata["sae_dim"],
+        traj_dim=metadata["traj_dim"],
+        hidden_dim=metadata["hidden_dim"],
+        dropout=metadata["dropout"],
+        best_metric=best_metric,
+        args=args,
+    )
 
 
 def build_loggers(log_dir: Path, run_name: str) -> list[CSVLogger | WandbLogger]:

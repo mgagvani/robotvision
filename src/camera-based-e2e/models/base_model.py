@@ -440,14 +440,14 @@ def collate_with_images(batch):
     future = [torch.as_tensor(b["FUTURE"], dtype=torch.float32) for b in batch]
     intent = torch.as_tensor([b["INTENT"] for b in batch])
     names = [b["NAME"] for b in batch]
-
-    cams = list(zip(*[b["IMAGES_JPEG"] for b in batch]))  # per-camera tuples
-    images_jpeg = [list(cam_imgs) for cam_imgs in cams]  # stay on CPU
-
-    return {
+    images_jpeg = [list(b["IMAGES_JPEG"]) for b in batch]
+    collated = {
         "PAST": torch.stack(past, dim=0),
         "FUTURE": torch.stack(future, dim=0),
         "INTENT": intent,
         "IMAGES_JPEG": images_jpeg,
         "NAME": names,
     }
+    if "SCENE_TYPE" in batch[0]:
+        collated["SCENE_TYPE"] = [b["SCENE_TYPE"] for b in batch]
+    return collated

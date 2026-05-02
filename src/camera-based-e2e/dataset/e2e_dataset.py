@@ -10,6 +10,8 @@ import torchvision
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
+from utils.scene_labels import infer_scene_type, unique_scene_types
+
 
 DEFAULT_CAMERA_ORDER = [
     "FRONT_LEFT",
@@ -33,12 +35,14 @@ class E2EDataset(Dataset):
         seed: Optional[int] = None,
         image_order: Optional[List[str]] = None,
         return_context_name: bool = True,
+        return_scene_type: bool = False,
     ) -> None:
         self.root_dir = Path(root_dir)
         self.split = split
         self.images = images
         self.image_order = image_order or DEFAULT_CAMERA_ORDER
         self.return_context_name = return_context_name
+        self.return_scene_type = return_scene_type
 
         self.split_dir = self.root_dir / split
         manifest_path = self.split_dir / "manifest.jsonl"
@@ -58,6 +62,15 @@ class E2EDataset(Dataset):
             rng = random.Random(seed) if seed is not None else random
             start = rng.randint(0, total - n_items)
             self.entries = self.entries[start : start + n_items]
+
+        self.available_scene_types = unique_scene_types(
+            self.split_dir,
+            [str(entry["sample_dir"]) for entry in self.entries],
+        )
+        if self.return_scene_type and not self.available_scene_types:
+            raise ValueError(
+                "Could not infer any scene types from exported sample directories."
+            )
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -96,13 +109,23 @@ class E2EDataset(Dataset):
                 meta = json.load(f)
             name = meta.get("context_name", name)
 
-        return {
+        sample = {
             "PAST": past,
             "FUTURE": future,
             "IMAGES": images,
             "INTENT": intent,
             "NAME": name,
         }
+        if self.return_scene_type:
+            scene_type = entry.get("scene_type")
+            if scene_type is None:
+                scene_type = infer_scene_type(self.split_dir, entry["sample_dir"])
+            if scene_type is None:
+                raise ValueError(
+                    f"Could not infer scene type for exported sample '{entry['sample_dir']}'."
+                )
+            sample["SCENE_TYPE"] = scene_type
+        return sample
 
 
 if __name__ == "__main__":
