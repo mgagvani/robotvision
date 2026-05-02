@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 import torchvision
+from dataclasses import asdict, is_dataclass
 
 from .losses.depth_loss import DepthLoss
 from .proposal_planner import IPadConfig
@@ -33,12 +34,36 @@ class LitModel(pl.LightningModule):
     ):
         super(LitModel, self).__init__()
         self.model = model
-        self.hparams.lr = lr
-        self.hparams.lr_vision = lr_vision
+        self.has_nvjpeg = True
 
-        cfg = ipad_config if ipad_config is not None else IPadConfig()
-        for field, value in asdict(cfg).items():
-            setattr(self.hparams, field, value)
+        # Collect model's own config (if any) for logging/hparams
+        _model_cfg = getattr(model, "cfg", None)
+        if _model_cfg is None:
+            cfg_dict = {}
+        elif is_dataclass(_model_cfg):
+            cfg_dict = asdict(_model_cfg)
+        elif isinstance(_model_cfg, dict):
+            cfg_dict = dict(_model_cfg)
+        else:
+            try:
+                cfg_dict = dict(vars(_model_cfg))
+            except TypeError:
+                cfg_dict = {"repr": repr(_model_cfg)}
+
+        hparams = {
+            "lr": lr,
+            "lr_vision": lr_vision,
+            "model_name": model.__class__.__name__,
+            "model_cfg": cfg_dict,
+        }
+        for k, v in cfg_dict.items():
+            if isinstance(v, (int, float, str, bool)) or v is None:
+                hparams[f"model_cfg_{k}"] = v
+
+        # iPad-style training hyperparameters
+        ipad_cfg = ipad_config if ipad_config is not None else IPadConfig()
+        for field, value in asdict(ipad_cfg).items():
+            hparams[field] = value
 
         self.example_input_array = ({
             'PAST': torch.zeros((1, 16, 6)),  # PAST
@@ -46,40 +71,81 @@ class LitModel(pl.LightningModule):
             'INTENT': torch.tensor([1.0]),  # INTENT
         },)
 
-        self.save_hyperparameters()
+        self.save_hyperparameters(hparams, ignore=["model"])
 
     # --- Data Loading ---- 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
-        # move actual tensors
-        out = super().transfer_batch_to_device(batch, device, dataloader_idx)
-        # keep encoded JPEG bytes on cpu to decode later
+        # if not a dict, it's not actually proper training data, so delegate this to the super()class
+        if not isinstance(batch, dict):
+            return super().transfer_batch_to_device(batch, device, dataloader_idx)
+
+        # don't move images_jpeg to gpu, move the decoded images to gpu
         if "IMAGES_JPEG" in batch:
-            out["IMAGES_JPEG"] = batch["IMAGES_JPEG"]
-        return out
+            images_jpeg = batch["IMAGES_JPEG"]
+            batch_wo_jpeg = dict(batch)
+            batch_wo_jpeg.pop("IMAGES_JPEG", None)
+            moved = super().transfer_batch_to_device(batch_wo_jpeg, device, dataloader_idx)
+            moved["IMAGES"] = self.decode_batch_jpeg(images_jpeg, device=device)
+            return moved
+
+        if "IMAGES" in batch:
+            images = batch["IMAGES"]
+            rest = {k: v for k, v in batch.items() if k != "IMAGES"}
+            moved = super().transfer_batch_to_device(rest, device, dataloader_idx)
+            moved["IMAGES"] = [
+                img.to(device, non_blocking=True) if img is not None else None
+                for img in images
+            ]
+            return moved
+
+        return super().transfer_batch_to_device(batch, device, dataloader_idx)
 
 
-    def decode_batch_jpeg(self, images_jpeg: List[List[torch.Tensor]]) -> List[torch.Tensor]:
+    def decode_batch_jpeg(
+        self,
+        images_jpeg: List[List[torch.Tensor]],
+        device: torch.device = None,
+    ) -> List[torch.Tensor]:
+        cam_idxs_used = tuple(getattr(getattr(self.model, "cfg", None), "cam_idxs_used", range(len(images_jpeg))))
+        decode_device = self.device if device is None else device
+
+        selected = [(cam_idx, images_jpeg[cam_idx]) for cam_idx in cam_idxs_used]
+
         # Flatten cameras
         flat_encoded, cam_sizes = [], []
-        for cam in images_jpeg:
-            cam_sizes.append(len(cam))
-            flat_encoded.extend(
-                jpg if isinstance(jpg, torch.Tensor) else torch.frombuffer(memoryview(jpg), dtype=torch.uint8)
-                for jpg in cam
-            )
+        for cam_idx, cam in selected:
+            cam_sizes.append((cam_idx, len(cam)))
+            for jpg in cam:
+                t = jpg if isinstance(jpg, torch.Tensor) else torch.frombuffer(memoryview(jpg), dtype=torch.uint8)
+                # decode_jpeg requires the raw jpeg bytes to be on cpu
+                if t.device.type != "cpu":
+                    t = t.cpu()
+                flat_encoded.append(t)
         
-        flat_decoded = torchvision.io.decode_jpeg(
-            flat_encoded, 
-            mode=torchvision.io.ImageReadMode.UNCHANGED,
-            device = self.device,
-        ) # list of (C, H, W) gpu tensors
+        try:
+            flat_decoded = torchvision.io.decode_jpeg(
+                flat_encoded, 
+                mode=torchvision.io.ImageReadMode.UNCHANGED,
+                device=decode_device,
+            ) # list of (C, H, W) gpu tensors
+        except Exception as e:
+            if "nvJPEG" not in str(e):
+                raise e
+            self.has_nvjpeg = False
+            flat_decoded = torchvision.io.decode_jpeg(
+                flat_encoded,
+                mode=torchvision.io.ImageReadMode.UNCHANGED,
+                device="cpu",
+            )
+            if torch.device(decode_device).type == "cuda":
+                flat_decoded = [img.to(decode_device, non_blocking=True) for img in flat_decoded]
 
-        out = []
+        out = [None] * len(images_jpeg)
         idx = 0
-        for n in cam_sizes:
-            cam_list = flat_decoded[idx: idx+n]
+        for cam_idx, n in cam_sizes:
+            out[cam_idx] = torch.stack(flat_decoded[idx:idx+n], dim=0)
             idx += n
-            out.append(torch.stack(cam_list, dim=0))  # (B, C, H, W)
+
         return out
 
     def on_fit_start(self) -> None:
@@ -360,17 +426,14 @@ class LitModel(pl.LightningModule):
         pred = pred_future
         t_steps = future.shape[1]
         t2 = t_steps * 2
-        k_modes = self.model.n_proposals if hasattr(self.model, "n_proposals") else 1
 
         if pred.ndim != 2:
-            raise ValueError(f"Unexpected pred shape {pred.shape}; expected (B, T*2) or (B, {k_modes}*T*2).")
+            raise ValueError(f"Unexpected pred shape {pred.shape}; expected 2D (B, K*T*2).")
 
-        if pred.shape[1] == t2:
-            pred = pred.view(pred.size(0), 1, t_steps, 2)
-        elif pred.shape[1] == k_modes * t2:
-            pred = pred.view(pred.size(0), k_modes, t_steps, 2)
-        else:
-            raise ValueError(f"Unexpected pred shape {pred.shape}; expected (B, T*2) or (B, {k_modes}*T*2).")
+        if pred.shape[1] % t2 != 0:
+            raise ValueError(f"pred dim1={pred.shape[1]} is not divisible by T*2={t2}.")
+        k_modes = pred.shape[1] // t2
+        pred = pred.view(pred.size(0), k_modes, t_steps, 2)
 
         if not torch.isfinite(pred).all():
             pred = torch.nan_to_num(pred, nan=0.0, posinf=1e3, neginf=-1e3)
@@ -430,49 +493,126 @@ class LitModel(pl.LightningModule):
         rfs_weight = getattr(self.hparams, "rfs_weight", 0.0)
         loss_rfs = rfs_weight * rfs_unweighted
 
-        # ---- Score loss (configurable) ----
+        # ---- Score loss ----
         if k_modes > 1 and pred_scores is not None:
             if not torch.isfinite(pred_scores).all():
                 pred_scores = torch.nan_to_num(pred_scores, nan=0.0, posinf=1e3, neginf=-1e3)
 
-            score_loss_type = getattr(self.hparams, "score_loss_type", "bce")
-            tau = getattr(self.hparams, "score_temperature", 5.0)
-
-            with torch.no_grad():
-                quality_target = self._compute_quality_target(pred, gt, future, tau, past=past)  # (B, K)
-                best_idx = quality_target.argmax(dim=1)                               # (B,)
-
-            if score_loss_type == "ce":
-                loss_score = F.cross_entropy(pred_scores, best_idx)
-            elif score_loss_type == "listnet":
-                target_probs = F.softmax(quality_target / max(tau * 0.1, 1e-6), dim=1)
-                loss_score = F.kl_div(
-                    F.log_softmax(pred_scores, dim=1),
-                    target_probs,
-                    reduction="batchmean",
-                )
+            # Legacy ScorerModel path (mse/reinforce/margin) when model.cfg specifies a loss_type
+            model_loss_type = getattr(self.hparams, "model_cfg_loss_type", None)
+            if model_loss_type is not None:
+                ade = ade_per_mode.detach()
+                if model_loss_type == "mse":
+                    loss_score = F.mse_loss(pred_scores, ade)
+                elif model_loss_type == "reinforce":
+                    tau_base = getattr(self.hparams, "model_cfg_loss_tau_base", 1.0)
+                    decay_factor = getattr(self.hparams, "model_cfg_loss_tau_decay", 0.95)
+                    entropy_lambda = getattr(self.hparams, "model_cfg_loss_entropy_lambda", 0.01)
+                    logits = -pred_scores / max(0.1, tau_base * (decay_factor ** self.current_epoch))
+                    p = F.softmax(logits, dim=1)
+                    loss_selection = (p * ade).sum(dim=1).mean()
+                    entropy = -(p * (p + 1e-8).log()).sum(dim=1).mean()
+                    loss_score = loss_selection - entropy_lambda * entropy
+                elif model_loss_type == "margin":
+                    s_diff = pred_scores.unsqueeze(2) - pred_scores.unsqueeze(1)
+                    ade_diff = ade.unsqueeze(2) - ade.unsqueeze(1)
+                    target = (ade_diff > 0).float()
+                    weight = ade_diff.abs()
+                    per_pair = F.binary_cross_entropy_with_logits(s_diff, target, reduction='none')
+                    loss_score = (per_pair * weight).sum() / (weight.sum() + 1e-8)
+                else:
+                    raise NotImplementedError(f"Loss {model_loss_type} is not implemented")
+                pred_idx = pred_scores.argmin(dim=1)
+                ade_pred = ade_per_mode[torch.arange(pred.size(0), device=pred.device), pred_idx].mean()
             else:
-                bce_loss = F.binary_cross_entropy_with_logits(pred_scores, quality_target)
-                loss_score = bce_loss
-
-                if score_loss_type == "bce_pairwise":
-                    margin = getattr(self.hparams, "score_margin", 0.2)
-                    rank_weight = getattr(self.hparams, "score_rank_weight", 0.2)
-                    topk = int(getattr(self.hparams, "score_topk", 0))
-
-                    best_scores = pred_scores.gather(1, best_idx.unsqueeze(1))  # (B,1)
-                    pairwise_margin = margin - (best_scores - pred_scores)      # (B,K)
-                    pairwise_margin.scatter_(1, best_idx.unsqueeze(1), 0.0)
-
-                    if topk > 0:
-                        k_eff = min(topk, pairwise_margin.size(1) - 1)
-                        hardest = pairwise_margin.topk(k_eff, dim=1).values
-                        rank_loss = F.relu(hardest).mean()
-                    else:
-                        rank_loss = F.relu(pairwise_margin).mean()
-                    loss_score = bce_loss + rank_weight * rank_loss
+                # iPad-style BCE / CE / bce_pairwise / listnet scorer
+                score_loss_type = getattr(self.hparams, "score_loss_type", "bce")
+                tau = getattr(self.hparams, "score_temperature", 5.0)
+                with torch.no_grad():
+                    quality_target = self._compute_quality_target(pred, gt, future, tau, past=past)
+                    best_idx = quality_target.argmax(dim=1)
+                if score_loss_type == "ce":
+                    loss_score = F.cross_entropy(pred_scores, best_idx)
+                elif score_loss_type == "listnet":
+                    target_probs = F.softmax(quality_target / max(tau * 0.1, 1e-6), dim=1)
+                    loss_score = F.kl_div(
+                        F.log_softmax(pred_scores, dim=1),
+                        target_probs,
+                        reduction="batchmean",
+                    )
+                else:
+                    bce_loss = F.binary_cross_entropy_with_logits(pred_scores, quality_target)
+                    loss_score = bce_loss
+                    if score_loss_type == "bce_pairwise":
+                        margin = getattr(self.hparams, "score_margin", 0.2)
+                        rank_weight = getattr(self.hparams, "score_rank_weight", 0.2)
+                        topk = int(getattr(self.hparams, "score_topk", 0))
+                        best_scores = pred_scores.gather(1, best_idx.unsqueeze(1))
+                        pairwise_margin = margin - (best_scores - pred_scores)
+                        pairwise_margin.scatter_(1, best_idx.unsqueeze(1), 0.0)
+                        if topk > 0:
+                            k_eff = min(topk, pairwise_margin.size(1) - 1)
+                            hardest = pairwise_margin.topk(k_eff, dim=1).values
+                            rank_loss = F.relu(hardest).mean()
+                        else:
+                            rank_loss = F.relu(pairwise_margin).mean()
+                        loss_score = bce_loss + rank_weight * rank_loss
         else:
             loss_score = torch.tensor(0.0, device=self.device)
+
+        # Train-only adversarial scorer supervision in trajectory space.
+        loss_adv = torch.tensor(0.0, device=self.device)
+        adv_enabled = bool(getattr(self.hparams, "model_cfg_adv_enabled", False))
+        if (stage == "train" and adv_enabled and k_modes > 1 and pred_scores is not None and pred_traj_flat is not None and query_for_score is not None and hasattr(self.model, "traj_features") and hasattr(self.model, "score_decoder")):
+            epsilon = float(getattr(self.hparams, "model_cfg_adv_epsilon", 0.10)) # max perturbation
+            adv_steps = max(1, int(getattr(self.hparams, "model_cfg_adv_steps", 3))) # running Projected Gradient Descent
+            alpha = epsilon / adv_steps
+
+            original_traj = pred_traj_flat.detach()
+            adv_traj = original_traj
+            for _ in range(adv_steps):
+                # run forward pass of scorer on adversarial trajectory
+                attack_traj = adv_traj.detach().requires_grad_(True)
+                traj_feat_adv = self.model.traj_features(attack_traj)
+                score_adv = self.model.score_decoder(
+                    torch.cat([query_for_score, traj_feat_adv], dim=-1)
+                ).squeeze(-1)
+
+                # compute gradient, gradient ASCENT to MAXIMIZE loss.
+                grad = torch.autograd.grad(score_adv.sum(), attack_traj, only_inputs=True)[0]
+                adv_traj = attack_traj + alpha * grad.sign()
+                delta = torch.clamp(adv_traj - original_traj, min=-epsilon, max=epsilon)
+                adv_traj = (original_traj + delta).detach()
+
+            bsz, _, t2_adv = adv_traj.shape
+            t_adv = t2_adv // 2
+            adv_ade = torch.norm(adv_traj.view(bsz, k_modes, t_adv, 2) - future[:, None], dim=-1,).mean(dim=-1).detach()
+            # Replicate DeepMonocularModel foward pass
+            adv_traj_feat = self.model.traj_features(adv_traj)
+            adv_scores = self.model.score_decoder(
+                torch.cat([query_for_score, adv_traj_feat], dim=-1)
+            ).squeeze(-1)
+            loss_adv = F.mse_loss(adv_scores, adv_ade)
+
+        # Scorer Metrics
+        scorer_metrics = {}
+        if k_modes > 1 and pred_scores is not None:
+            # Rank of the scorer's top-1 pick among oracle-sorted proposals
+            oracle_ranking = ade_per_mode.argsort(dim=1)  # (B, K) indices sorted by true ADE
+            oracle_rank_of = oracle_ranking.argsort(dim=1)  # (B, K) rank of each proposal
+            scorer_pick = pred_scores.argmin(dim=1)         # (B,) scorer's best
+            pick_rank = oracle_rank_of[torch.arange(pred.size(0), device=pred.device), scorer_pick].float()  # (B,)
+            scorer_metrics[f"{stage}_scorer_mean_rank"] = pick_rank.mean()
+            for topk in (1, 5, 10):
+                if topk <= k_modes:
+                    scorer_metrics[f"{stage}_scorer_top{topk}_acc"] = (pick_rank < topk).float().mean()
+            # Spearman rank correlation
+            K = ade_per_mode.size(1)
+            oracle_ranks = oracle_rank_of.float()  # (B, K)
+            scorer_ranks = pred_scores.argsort(dim=1).argsort(dim=1).float()  # (B, K)
+            d = oracle_ranks - scorer_ranks
+            rho = 1 - 6 * (d ** 2).sum(dim=1) / (K * (K ** 2 - 1))
+            scorer_metrics[f"{stage}_scorer_spearman"] = rho.mean()
 
         # Depth Loss
         if pred_depth is not None:
@@ -524,6 +664,7 @@ class LitModel(pl.LightningModule):
             f"{stage}_loss_score": loss_score,
             f"{stage}_loss_depth": loss_depth,
             f"{stage}_loss_rfs": loss_rfs,
+            f"{stage}_loss_adv": loss_adv,
             f"{stage}_rfs_unweighted": rfs_unweighted,
             f"{stage}_loss": total_loss,
         }
@@ -537,19 +678,10 @@ class LitModel(pl.LightningModule):
             log_payload[f"{stage}_ade_regret"] = regret
         for ri, oade in enumerate(refine_oracle_ades):
             log_payload[f"{stage}_ade_oracle_refine_{ri}"] = oade
-        if pred_scores is not None and k_modes > 1:
-            with torch.no_grad():
-                mode_l1 = (pred - gt).abs().sum(dim=-1).mean(dim=-1)  # (B,K)
-                best_idx = mode_l1.argmin(dim=1)
-                pred_idx = pred_scores.argmax(dim=1)
-                top1_acc = (pred_idx == best_idx).float().mean()
-                s_best = pred_scores.gather(1, best_idx.unsqueeze(1)).squeeze(1)
-                masked = pred_scores.clone()
-                masked.scatter_(1, best_idx.unsqueeze(1), float("-inf"))
-                s_second = masked.max(dim=1).values
-                log_payload[f"{stage}_score_top1_acc"] = top1_acc
-                log_payload[f"{stage}_score_gap_best_second"] = (s_best - s_second).mean()
-        self.log_dict(log_payload, prog_bar=True, logger=True)
+        log_payload.update(scorer_metrics)
+        self.log_dict(log_payload, prog_bar=True, logger=True,
+                      batch_size=past.size(0),
+                      sync_dist=(stage == "val"))
 
         return total_loss
     
@@ -559,19 +691,32 @@ class LitModel(pl.LightningModule):
     def validation_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, "val")
     
-def collate_with_images(batch):
+def collate_with_images(batch, cam_idxs=(1,)):
+    """Collate that CPU-decodes requested cameras in the dataloader worker."""
     past = [torch.as_tensor(b["PAST"], dtype=torch.float32) for b in batch]
     future = [torch.as_tensor(b["FUTURE"], dtype=torch.float32) for b in batch]
     intent = torch.as_tensor([b["INTENT"] for b in batch])
     names = [b["NAME"] for b in batch]
 
-    cams = list(zip(*[b["IMAGES_JPEG"] for b in batch]))  # per-camera tuples
-    images_jpeg = [list(cam_imgs) for cam_imgs in cams]  # stay on CPU
+    num_cams = len(batch[0]["IMAGES_JPEG"])
+    images = [None] * num_cams
+    for cam_idx in cam_idxs:
+        jpegs = [
+            b["IMAGES_JPEG"][cam_idx] if isinstance(b["IMAGES_JPEG"][cam_idx], torch.Tensor)
+            else torch.frombuffer(bytearray(b["IMAGES_JPEG"][cam_idx]), dtype=torch.uint8)
+            for b in batch
+        ]
+        decoded = torchvision.io.decode_jpeg(
+            jpegs,
+            mode=torchvision.io.ImageReadMode.UNCHANGED,
+            device="cpu",
+        )
+        images[cam_idx] = torch.stack(decoded, dim=0)
 
     return {
         "PAST": torch.stack(past, dim=0),
         "FUTURE": torch.stack(future, dim=0),
         "INTENT": intent,
-        "IMAGES_JPEG": images_jpeg,
+        "IMAGES": images,
         "NAME": names,
     }

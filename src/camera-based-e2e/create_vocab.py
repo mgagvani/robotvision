@@ -2,7 +2,7 @@ import numpy as np
 from sklearn.cluster import MiniBatchKMeans
 import os
 
-from loader import WaymoE2E
+from loader import WaymoE2E, collate_with_images
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -13,11 +13,11 @@ sns.set_style("ticks")
 def get_all_trajectories():
     # Instantiate dataloader w/ n_items None to get everything
     dataset = WaymoE2E(indexFile='index_train.pkl', 
-                       data_dir='/anvil/scratch/x-mgagvani/wod/waymo_end_to_end_camera_v1_0_0/waymo_open_dataset_end_to_end_camera_v_1_0_0',  
-                       n_items=None # set to None eventually
+                       data_dir='/anvil/scratch/x-mgagvani/wod/waymo_end_to_end_camera_v1_0_0/waymo_open_dataset_end_to_end_camera_v_1_0_0',
+                       n_items=None  # set to None eventually
                        )
 
-    dataloader = DataLoader(dataset, batch_size=512, num_workers=16, persistent_workers=True, pin_memory=True)
+    dataloader = DataLoader(dataset, batch_size=512, num_workers=0, collate_fn=collate_with_images, pin_memory=True)
 
     # iterate over dataloader, only obtain GT future (x, y)
     all_traj = []
@@ -83,7 +83,8 @@ def cluster_trajectories(trajectories, n_clusters=1024):
 
 if __name__ == "__main__":
     all_traj = get_all_trajectories()
-    plot_trajectories(all_traj)
-    cluster_centers = cluster_trajectories(all_traj, n_clusters=1024)
-    plot_trajectories(cluster_centers, name="cluster_centers.png")
-    np.save("./vocab.npy", cluster_centers)
+    # plot_trajectories(all_traj)
+    N = 8192
+    cluster_centers = cluster_trajectories(all_traj, n_clusters=N)
+    plot_trajectories(cluster_centers, name=f"cluster_centers_{N}.png")
+    np.save(f"./vocab_{N}.npy", cluster_centers)

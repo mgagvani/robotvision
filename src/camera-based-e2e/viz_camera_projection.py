@@ -126,10 +126,11 @@ Notes for further development
   checkpoints.  If the architecture changes, update the reconstruction branch
   (the ``else`` block) and make sure ``n_proposals`` / ``horizon`` are set.
 
-- **Segment selection seed**: Change ``--seed`` (not yet exposed as CLI arg;
-  hardcoded to 42 in ``WaymoE2ESequential``) to get different segment
-  combinations.  To expose it, add an ``argparse`` argument and pass it through
-  ``generate_viz_frames`` -> ``WaymoE2ESequential(seed=...)``.
+- **Segment selection seed**: Use ``--seed`` to get different segment
+  combinations while keeping runs reproducible.
+
+- **Smaller files**: Use ``--video_scale`` (for example ``0.9``) to downscale
+  output frames and reduce MP4 filesize.
 
 - **Training set visualization**: Pass ``--index_file index_train.pkl``.  The
   segment index cache is keyed by the index filename, so
@@ -165,10 +166,12 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import numpy as np
 import torch
+import torch.nn as nn
 from PIL import Image
 from tqdm import tqdm
 
 from protos import e2e_pb2
+from models.gtrs import GTRSModel
 from models.monocular import DeepMonocularModel
 from models.feature_extractors import SAMFeatures
 
@@ -182,38 +185,207 @@ CAMERA_FRONT_RIGHT = 3
 FRONT3_CAMERAS = [CAMERA_FRONT_LEFT, CAMERA_FRONT, CAMERA_FRONT_RIGHT]
 
 
-def load_model(model_path: str, device: torch.device) -> DeepMonocularModel:
-    """Load the trained DeepMonocularModel from checkpoint."""
+class LegacyGTRSModel(nn.Module):
+    """
+    GTRS checkpoint-compatible architecture variant used by older runs.
+
+    Key differences vs current models.gtrs.GTRSModel:
+      - no positional encoding on visual tokens
+      - status encoder consumes only flattened past state (no intent one-hot)
+      - score head is 2-layer MLP: d_model -> d_ffn -> 1
+    """
+
+    def __init__(
+        self,
+        feature_extractor: nn.Module,
+        d_model: int = 256,
+        d_ffn: int = 2048,
+        n_head: int = 8,
+        n_layers: int = 4,
+        n_past: int = 16,
+    ):
+        super().__init__()
+        self.features = feature_extractor
+        self.d_features = sum(self.features.dims)
+        h, w = self.features.data_config["input_size"][1:]
+        self.n_img_tokens = (h // self.features.patch_size) * (w // self.features.patch_size)
+
+        self.vocab = nn.Parameter(
+            torch.from_numpy(np.load(Path(__file__).parent / "vocab.npy")),
+            requires_grad=False,
+        )
+        self.n_proposals = int(self.vocab.shape[0])
+        self.horizon = int(self.vocab.shape[1])
+        self.dt = 0.25
+        self.max_accel = 8.0
+        self.max_omega = 1.0
+
+        self.down_conv = nn.Conv1d(self.d_features, d_model, 1, 1)
+        self.vocab_embed = nn.Sequential(
+            nn.Linear(self.vocab[0].numel(), d_ffn),
+            nn.GELU(),
+            nn.Linear(d_ffn, d_model),
+        )
+        self.transformer = nn.TransformerDecoder(
+            nn.TransformerDecoderLayer(
+                d_model=d_model,
+                nhead=n_head,
+                dim_feedforward=d_ffn,
+                dropout=0.0,
+                batch_first=True,
+            ),
+            num_layers=n_layers,
+        )
+
+        # Keep parameterized layers at indices 1 and 3 to match legacy checkpoints.
+        self.status_encoding = nn.Sequential(
+            nn.Identity(),
+            nn.Linear(n_past * 6, d_ffn),
+            nn.GELU(),
+            nn.Linear(d_ffn, d_model),
+        )
+        self.heads = nn.ModuleDict(
+            {
+                "scores": nn.Sequential(
+                    nn.Linear(d_model, d_ffn),
+                    nn.GELU(),
+                    nn.Linear(d_ffn, 1),
+                )
+            }
+        )
+
+    def _extract_tokens(self, front_cam: torch.Tensor) -> torch.Tensor:
+        bsz, n_cam, c, h, w = front_cam.shape
+        cam_inputs = front_cam.reshape(bsz * n_cam, c, h, w)
+        feats_vit = self.features(cam_inputs)
+        if isinstance(feats_vit, (list, tuple)):
+            feats_vit = torch.cat([f.flatten(2) for f in feats_vit], dim=1)
+        else:
+            feats_vit = feats_vit.flatten(2)
+        tokens = feats_vit.permute(0, 2, 1)
+        n_tokens = tokens.shape[1]
+        return tokens.reshape(bsz, n_cam, n_tokens, self.d_features)
+
+    def forward(self, x: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        past = x["PAST"]
+        images = x["IMAGES"]
+        bsz = past.size(0)
+
+        visual_tokens = self._extract_tokens(images[1][:, None, ...])
+        visual_tokens = visual_tokens.flatten(start_dim=1, end_dim=2)
+        tokens = self.down_conv(visual_tokens.transpose(1, 2)).transpose(1, 2)
+
+        out: Dict[str, torch.Tensor] = {}
+        vocab = self.vocab
+        out["trajectory"] = vocab.unsqueeze(0).expand(bsz, -1, -1, -1).reshape(bsz, -1)
+
+        vocab_flat = vocab.reshape(vocab.shape[0], -1)
+        embedded_vocab = self.vocab_embed(vocab_flat)
+        tr_out = self.transformer(embedded_vocab.unsqueeze(0).expand(bsz, -1, -1), tokens)
+
+        status = self.status_encoding(past.reshape(bsz, -1))
+        dist_status = tr_out + status.unsqueeze(1)
+        out["scores"] = self.heads["scores"](dist_status).squeeze(-1)
+        return out
+
+
+def _infer_model_type(hparams: dict, mapped_state: Dict[str, torch.Tensor]) -> str:
+    """Infer architecture from checkpoint metadata/state keys."""
+    model_name = str(hparams.get("model_name", "")).lower()
+    if "gtrs" in model_name:
+        return "gtrs"
+    if "deepmonocular" in model_name:
+        return "deepmonocular"
+
+    keys = list(mapped_state.keys())
+    if any(k.startswith("vocab_embed.") or k.startswith("status_encoding.") for k in keys):
+        return "gtrs"
+    return "deepmonocular"
+
+
+def load_model(
+    model_path: str,
+    device: torch.device,
+    model_type: str = "auto",
+    feature_model: str = "timm/vit_pe_spatial_small_patch16_512.fb",
+) -> nn.Module:
+    """Load model from checkpoint (auto/GTRS/DeepMonocular)."""
     ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
 
-    # The model is saved directly in hyper_parameters (older checkpoints)
-    if "hyper_parameters" in ckpt and "model" in ckpt["hyper_parameters"]:
-        model = ckpt["hyper_parameters"]["model"]
-    else:
-        # Newer checkpoints don't embed the model object; reconstruct it
+    hparams = ckpt.get("hyper_parameters", {}) if isinstance(ckpt, dict) else {}
+    state = ckpt.get("state_dict", {}) if isinstance(ckpt, dict) else ckpt
+    if not isinstance(state, dict):
+        raise ValueError(f"Unsupported checkpoint format at {model_path}")
+
+    # Remove "model." prefix from Lightning checkpoint
+    mapped_state: Dict[str, torch.Tensor] = {}
+    for k, v in state.items():
+        if k.startswith("model."):
+            k = k[6:]
+        mapped_state[k] = v
+
+    resolved_model_type = model_type
+    if resolved_model_type == "auto":
+        resolved_model_type = _infer_model_type(hparams, mapped_state)
+    print(f"Detected model type: {resolved_model_type}")
+
+    # Older checkpoints may store pickled model directly.
+    if resolved_model_type == "deepmonocular" and "model" in hparams:
+        model = hparams["model"]
+    elif resolved_model_type == "gtrs":
+        # Legacy GTRS checkpoints have no positional_encoding and different
+        # status/score head wiring.
+        use_legacy_gtrs = "positional_encoding" not in mapped_state and "status_encoding.1.weight" in mapped_state
+        if use_legacy_gtrs:
+            cfg = hparams.get("model_cfg", {}) if isinstance(hparams, dict) else {}
+            model = LegacyGTRSModel(
+                feature_extractor=SAMFeatures(
+                    model_name=feature_model,
+                    frozen=True,
+                ),
+                d_model=int(cfg.get("d_model", 256)),
+                d_ffn=int(cfg.get("d_ffn", 2048)),
+                n_head=int(cfg.get("n_head", 8)),
+                n_layers=int(cfg.get("n_layers", 4)),
+                n_past=int(cfg.get("n_past", 16)),
+            )
+        else:
+            model = GTRSModel(
+                feature_extractor=SAMFeatures(
+                    model_name=feature_model,
+                    frozen=True,
+                ),
+                out_dim=20 * 2,
+            )
+    elif resolved_model_type == "deepmonocular":
         out_dim = 20 * 2
         model = DeepMonocularModel(
             feature_extractor=SAMFeatures(
-                model_name="timm/vit_pe_spatial_small_patch16_512.fb", frozen=True
+                model_name=feature_model,
+                frozen=True,
             ),
             out_dim=out_dim,
             n_blocks=4,
         )
+    else:
+        raise ValueError(f"Unsupported model_type={model_type}")
 
-    # Load state dict
-    state = ckpt.get("state_dict", {})
-    # Remove "model." prefix from Lightning checkpoint
-    mapped = {}
-    for k, v in state.items():
-        if k.startswith("model."):
-            k = k[6:]  # Remove "model." prefix
-        mapped[k] = v
-    model.load_state_dict(mapped, strict=True)
+    model.load_state_dict(mapped_state, strict=True)
 
     # Patch attributes that may be missing in older pickled model objects
+    if not hasattr(model, "n_proposals"):
+        if hasattr(model, "vocab"):
+            model.n_proposals = int(model.vocab.shape[0])
+        else:
+            raise AttributeError("Model is missing n_proposals and has no vocab to infer it")
     if not hasattr(model, "horizon"):
-        out_features = model.traj_decoder[-1].out_features
-        model.horizon = out_features // (model.n_proposals * 2)
+        if hasattr(model, "traj_decoder"):
+            out_features = model.traj_decoder[-1].out_features
+            model.horizon = out_features // (model.n_proposals * 2)
+        elif hasattr(model, "vocab"):
+            model.horizon = int(model.vocab.shape[1])
+        else:
+            raise AttributeError("Model is missing horizon and cannot be inferred")
     if not hasattr(model, "dt"):
         model.dt = 0.25
     if not hasattr(model, "max_accel"):
@@ -548,6 +720,10 @@ class WaymoE2ESequential:
                 window = frames  # use full segment
             self.selected_entries.extend((fn, s, l) for _, fn, s, l in window)
 
+        # Keep exact requested duration when total_frames is provided.
+        if total_frames is not None and len(self.selected_entries) > total_frames:
+            self.selected_entries = self.selected_entries[:total_frames]
+
     def __len__(self):
         return len(self.selected_entries)
 
@@ -731,12 +907,13 @@ def _stitch_front3(
 
 
 def generate_viz_frames(
-    model: DeepMonocularModel,
+    model: nn.Module,
     data_root: str,
     index_file: str,
     num_samples: int,
     device: torch.device,
     top_k: int = 10,
+    seed: int = 42,
 ) -> List[Dict]:
     """
     Generate visualization frames with model predictions projected onto all
@@ -751,6 +928,7 @@ def generate_viz_frames(
         index_file=index_file,
         data_dir=data_root,
         total_frames=num_samples,
+        seed=seed,
     )
 
     model.eval()
@@ -779,7 +957,7 @@ def generate_viz_frames(
             scores = scores.squeeze(0).cpu().numpy()  # (K,)
 
             # Get top-k proposals by score (lower score = better, since scorer predicts ADE)
-            top_k_indices = np.argsort(scores)[:top_k]
+            top_k_indices = np.argsort(scores)[: min(top_k, len(scores))]
             top_k_trajectories = traj_pred[top_k_indices]  # (top_k, T, 2)
 
             best_idx = top_k_indices[0]
@@ -837,22 +1015,30 @@ def create_video(
     viz_frames: List[Dict],
     output_path: str,
     fps: int = 4,
+    scale: float = 1.0,
 ):
     """Create MP4 video from visualization frames."""
     if not viz_frames:
         print("No frames to save")
         return
+    if scale <= 0:
+        raise ValueError(f"scale must be > 0, got {scale}")
 
     # Get frame dimensions from first frame
     h, w = viz_frames[0]["image"].shape[:2]
+    h_out = max(1, int(round(h * scale)))
+    w_out = max(1, int(round(w * scale)))
 
     # Create video writer
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
+    out = cv2.VideoWriter(output_path, fourcc, fps, (w_out, h_out))
 
     for frame_data in viz_frames:
+        img_rgb = frame_data["image"]
+        if scale != 1.0:
+            img_rgb = cv2.resize(img_rgb, (w_out, h_out), interpolation=cv2.INTER_AREA)
         # Convert RGB to BGR for OpenCV
-        img_bgr = cv2.cvtColor(frame_data["image"], cv2.COLOR_RGB2BGR)
+        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
         out.write(img_bgr)
 
     out.release()
@@ -918,6 +1104,19 @@ def main():
         help="Path to trained model checkpoint (.ckpt)",
     )
     parser.add_argument(
+        "--model_type",
+        type=str,
+        choices=["auto", "deepmonocular", "gtrs"],
+        default="auto",
+        help="Model architecture to load. Use auto to infer from checkpoint.",
+    )
+    parser.add_argument(
+        "--feature_model",
+        type=str,
+        default="timm/vit_pe_spatial_small_patch16_512.fb",
+        help="Backbone model name used when reconstructing checkpoints.",
+    )
+    parser.add_argument(
         "--index_file",
         type=str,
         default="index_val.pkl",
@@ -948,6 +1147,18 @@ def main():
         help="Frames per second for output video",
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for selecting/ordering segments",
+    )
+    parser.add_argument(
+        "--video_scale",
+        type=float,
+        default=1.0,
+        help="Uniform output scale for MP4 (e.g., 0.9 to reduce filesize slightly)",
+    )
+    parser.add_argument(
         "--format",
         type=str,
         choices=["mp4", "gif", "both"],
@@ -963,7 +1174,12 @@ def main():
 
     # Load model
     print(f"Loading model from {args.model_path}")
-    model = load_model(args.model_path, device)
+    model = load_model(
+        args.model_path,
+        device,
+        model_type=args.model_type,
+        feature_model=args.feature_model,
+    )
 
     # Generate visualization frames
     print(f"Generating {args.num_samples} sequential visualization frames...")
@@ -974,6 +1190,7 @@ def main():
         num_samples=args.num_samples,
         device=device,
         top_k=args.top_k,
+        seed=args.seed,
     )
 
     # Calculate overall metrics
@@ -985,11 +1202,11 @@ def main():
 
     # Save outputs
     if args.format in ["mp4", "both"]:
-        mp4_path = os.path.join(args.output_dir, "trajectory_camera_top10.mp4")
-        create_video(viz_frames, mp4_path, fps=args.fps)
+        mp4_path = os.path.join(args.output_dir, f"trajectory_camera_top{args.top_k}.mp4")
+        create_video(viz_frames, mp4_path, fps=args.fps, scale=args.video_scale)
 
     if args.format in ["gif", "both"]:
-        gif_path = os.path.join(args.output_dir, "trajectory_camera_top10.gif")
+        gif_path = os.path.join(args.output_dir, f"trajectory_camera_top{args.top_k}.gif")
         create_animated_gif(viz_frames, gif_path, fps=args.fps)
 
 
