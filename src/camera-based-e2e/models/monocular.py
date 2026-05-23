@@ -175,7 +175,7 @@ class DeepMonocularModel(nn.Module):
         traj_xy = torch.stack(xy_steps, dim=2)  # (B, K, T, 2)
         return traj_xy, traj_xy.reshape(traj_xy.size(0), -1), accel, omega  # (B, K*T*2)
 
-    def forward(self, x, sae=None):
+    def forward(self, x, sae=None, sae_target: str = "query", sae_latent_edit=None, sae_block_index: int | None = None):
         # Copied from MonocularModel
         # past: (B, 16, 6), intent: int
         past, images, intent = x['PAST'], x['IMAGES'], x['INTENT']
@@ -207,10 +207,25 @@ class DeepMonocularModel(nn.Module):
         past_flat = past.view(past.size(0), -1)
         query: torch.Tensor = self.query_init(torch.cat([intent_onehot, past_flat], dim=1)).unsqueeze(1)
 
-        for block in self.blocks:
+        planner_query_tokens = []
+        for block_idx, block in enumerate(self.blocks):
             query = block(query, tokens)
+            planner_query_tokens.append(query.squeeze(1))
 
-        if sae is not None:
+            if sae is not None and sae_target == "planner_query_block" and sae_block_index == block_idx:
+                sae_out = sae(query.squeeze(1))
+                query_latents = sae_out["latents"]
+                if sae_latent_edit is not None:
+                    query_latents = sae_latent_edit(query_latents)
+                    query = sae.decode(query_latents).unsqueeze(1)
+                else:
+                    query = sae_out["reconstruction"].unsqueeze(1)
+                planner_query_tokens[-1] = query.squeeze(1)
+
+        if sae_target not in {"query", "legacy_query", "score", "traj", "control", "planner_query_block"}:
+            raise ValueError(f"Unsupported SAE target '{sae_target}'")
+
+        if sae is not None and sae_target in {"query", "legacy_query"}:
             sae_out = sae(query.squeeze(1))
             query = sae_out["reconstruction"].unsqueeze(1)
 
@@ -219,18 +234,46 @@ class DeepMonocularModel(nn.Module):
         control_pred = self.traj_decoder(query.squeeze(1)).view(
             query.size(0), self.n_proposals, self.horizon, 2
         )  # (B, K, T, 2)
+
+        if sae is not None and sae_target == "control":
+            flat_control = control_pred.reshape(query.size(0) * self.n_proposals, self.horizon * 2)
+            sae_out = sae(flat_control)
+            control_latents = sae_out["latents"]
+            if sae_latent_edit is not None:
+                control_latents = sae_latent_edit(control_latents)
+                flat_control = sae.decode(control_latents)
+            else:
+                flat_control = sae_out["reconstruction"]
+            control_pred = flat_control.view(query.size(0), self.n_proposals, self.horizon, 2)
+
         traj_xy, traj_pred, accel, omega = self.bicycle_model(control_pred, past)  # (B, K, T*2)
 
         traj_pred_flat = traj_xy.reshape(traj_xy.size(0), self.n_proposals, -1)  # (B, K, T*2)
         traj_feat: torch.Tensor = self.traj_features(traj_pred_flat.detach())  # (B, K, C)
+
+        if sae is not None and sae_target == "traj":
+            traj_feat = sae(
+                traj_feat.reshape(query.size(0) * self.n_proposals, self.feature_dim)
+            )["reconstruction"].view(query.size(0), self.n_proposals, self.feature_dim)
+
         query_for_score = query.squeeze(1).detach()[:, torch.newaxis, :].expand(-1, self.n_proposals, -1)  # (B, K, C)
         score_in = torch.cat([query_for_score, traj_feat], dim=-1)  # (B, K, 2C)
+
+        if sae is not None and sae_target == "score":
+            score_in = sae(
+                score_in.reshape(query.size(0) * self.n_proposals, self.feature_dim * 2)
+            )["reconstruction"].view(query.size(0), self.n_proposals, self.feature_dim * 2)
+
         score_pred = self.score_decoder(score_in).squeeze(-1)  # (B, K)
 
         return {
-            "trajectory": traj_pred,
-            "scores": score_pred,
+            "trajectory_predicted": traj_pred,
+            "trajectory_feat": traj_feat,
+            "scores_predicted": score_pred,
+            "scores_input": score_in,
             "depth": output_depth,
             "controls": torch.stack([accel, omega], dim=-1).reshape(query.size(0), -1),
-            "query": query
+            "query": query,
+            "control_pred": control_pred,
+            **{f"planner_query_tok_block_{idx}": block_query for idx, block_query in enumerate(planner_query_tokens)},
         }

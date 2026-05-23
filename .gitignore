@@ -12,6 +12,8 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+*.pt
+
 # env setup script
 setup.sh
 
@@ -86,6 +88,14 @@ docs/_build/
 # PyBuilder
 .pybuilder/
 target/
+
+*.ckpt
+
+*.pkl
+
+src/camera-based-e2e/output/
+src/camera-based-e2e/sae_output/
+src/camera-based-e2e/sae_checkpoints/
 
 # Jupyter Notebook
 .ipynb_checkpoints

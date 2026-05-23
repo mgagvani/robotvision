@@ -7,18 +7,32 @@ from tqdm import tqdm
 from models.base_model import LitModel, collate_with_images
 from models.monocular import DeepMonocularModel
 from models.feature_extractors import SAMFeatures
-from models.initial_sae import SparseAutoEncoder
+from models.initial_sae import SparseAutoEncoder, load_torch_file
 from loader import WaymoE2E
+
+INPUT_KEY_TO_MODE = {
+    "scores_input": "score",
+    "trajectory_feat": "traj",
+    "control_pred": "control",
+    "legacy_query": "legacy_query",
+}
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--data_dir", type=str,
-                    default="/scratch/gilbreth/shar1159/waymo_open_dataset_end_to_end_camera_v_1_0_0")
+                    default="/scratch/gilbreth/chang899/waymo_data/waymo_open_dataset_end_to_end_camera_v_1_0_0")
 parser.add_argument("--model_ckpt", type=str,
-                    default="/scratch/gilbreth/shar1159/robotvision/src/camera-based-e2e/checkpoints/camera-e2e-epoch=04-val_loss=2.90.ckpt")
-parser.add_argument("--sae_ckpt", type=str, default="/scratch/gilbreth/shar1159/robotvision/src/camera-based-e2e/checkpoints/checkpoint_sae.pt", help="path to SAE checkpoint")
+                    default="/scratch/gilbreth/chang899/codes/int/src/camera-based-e2e/camera-e2e-epoch=04-val_loss=2.90.ckpt")
+parser.add_argument("--sae_ckpt", type=str, default="/scratch/gilbreth/chang899/codes/int/src/camera-based-e2e/output/sae_control_pred.pt", help="path to SAE checkpoint")
 parser.add_argument("--n_items", type=int, default=10000)
 parser.add_argument("--batch_size", type=int, default=64)
 parser.add_argument("--out", type=str, default=None, help="optional path to save raw results as .pt")
+parser.add_argument(
+    "--sae_target",
+    type=str,
+    default="auto",
+    choices=["auto", "query", "legacy_query", "score", "traj", "control"],
+    help="where to inject the SAE; auto prefers checkpoint metadata and falls back to dimension-based inference",
+)
 args = parser.parse_args()
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -41,14 +55,34 @@ net.to(device)
 net.eval()
 
 # --- Load SAE (infer dims from checkpoint) ---
-sae_ckpt = torch.load(args.sae_ckpt, map_location=device)
+sae_ckpt = load_torch_file(args.sae_ckpt, map_location=device)
 sd = sae_ckpt["model"]
 in_dims = sd["encoder.weight"].shape[1]
 expansion = sd["encoder.weight"].shape[0] // in_dims
 sae = SparseAutoEncoder(in_dims=in_dims, expansion=expansion).to(device)
 sae.load_state_dict(sd)
 sae.eval()
-print(f"SAE: in_dims={in_dims}, expansion={expansion}, hidden={in_dims * expansion}")
+
+if args.sae_target != "auto":
+    sae_target = args.sae_target
+else:
+    sae_target = sae_ckpt.get("mode") or INPUT_KEY_TO_MODE.get(sae_ckpt.get("input_key"))
+    if sae_target is None:
+        if in_dims == net.horizon * 2:
+            sae_target = "control"
+        elif in_dims == net.feature_dim * 2:
+            sae_target = "score"
+        elif in_dims == net.feature_dim:
+            sae_target = "query"
+        else:
+            raise ValueError(
+                f"Could not infer SAE target for checkpoint '{args.sae_ckpt}' with input dim {in_dims}. "
+                "Pass --sae_target explicitly."
+            )
+
+print(
+    f"SAE: target={sae_target}, in_dims={in_dims}, expansion={expansion}, hidden={in_dims * expansion}"
+)
 
 # --- Data ---
 dataset = WaymoE2E(indexFile="index_val.pkl", data_dir=args.data_dir, n_items=args.n_items)
@@ -63,8 +97,8 @@ loader = torch.utils.data.DataLoader(
 
 def pick_best(out, B):
     """Select scorer's top-1 trajectory for each sample. Returns (B, 20, 2)."""
-    traj = out["trajectory"]           # (B, K*T*2) flat
-    scores = out["scores"]             # (B, K)
+    traj = out["trajectory_predicted"]  # (B, K*T*2) flat
+    scores = out["scores_predicted"]    # (B, K)
     K = scores.shape[1]
     T = 20
     traj_bkt2 = traj.view(B, K, T, 2)
@@ -74,8 +108,8 @@ def pick_best(out, B):
 
 def oracle_min_ade(out, future, B):
     """Min ADE across all K proposals."""
-    traj = out["trajectory"]
-    K = out["scores"].shape[1]
+    traj = out["trajectory_predicted"]
+    K = out["scores_predicted"].shape[1]
     T = 20
     traj_bkt2 = traj.view(B, K, T, 2)                              # (B, K, T, 2)
     dist = torch.norm(traj_bkt2 - future[:, None, :, :], dim=-1)   # (B, K, T)
@@ -97,7 +131,7 @@ with torch.no_grad():
         model_input = {"PAST": batch["PAST"], "IMAGES": batch["IMAGES"], "INTENT": batch["INTENT"]}
 
         out_base = net(model_input)
-        out_sae  = net(model_input, sae=sae)
+        out_sae  = net(model_input, sae=sae, sae_target=sae_target)
 
         for tag, out in [("base", out_base), ("sae", out_sae)]:
             pred = pick_best(out, B)                                         # (B, 20, 2)
