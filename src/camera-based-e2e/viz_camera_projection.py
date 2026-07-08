@@ -495,8 +495,9 @@ def project_trajectory_to_image(
     pts_opencv_cam[:, 1] = -pts_waymo_cam[:, 2]  # OpenCV y = -Waymo z (up -> down)
     pts_opencv_cam[:, 2] = pts_waymo_cam[:, 0]  # OpenCV z = Waymo x (forward -> depth)
 
-    # Filter points behind camera (z <= 0 in OpenCV convention)
-    valid_depth = pts_opencv_cam[:, 2] > 0.1  # at least 10cm in front
+    # Filter points behind or unrealistically close to the camera. Very near
+    # ground-plane points project to image edges and create distracting artifacts.
+    valid_depth = pts_opencv_cam[:, 2] > 1.0
 
     pixels = np.full((T, 2), np.nan)
 
@@ -541,26 +542,32 @@ def draw_trajectory_on_image(
     """Draw trajectory line and points on image."""
     img = image.copy()
 
-    # Filter out NaN points
     valid = ~np.isnan(trajectory_pixels).any(axis=1)
-    valid_pts = trajectory_pixels[valid].astype(np.int32)
-
-    if len(valid_pts) < 2:
+    if valid.sum() < 2:
         return img
 
     # Create overlay for alpha blending
     overlay = img.copy()
 
-    # Draw lines connecting consecutive valid points
-    for i in range(len(valid_pts) - 1):
-        pt1 = tuple(valid_pts[i])
-        pt2 = tuple(valid_pts[i + 1])
+    pts = trajectory_pixels.astype(np.float32)
+    max_segment_px = 0.35 * max(image.shape[:2])
+    for i in range(len(pts) - 1):
+        if not (valid[i] and valid[i + 1]):
+            continue
+        pt1_arr = pts[i]
+        pt2_arr = pts[i + 1]
+        if np.linalg.norm(pt2_arr - pt1_arr) > max_segment_px:
+            continue
+        pt1 = tuple(np.round(pt1_arr).astype(np.int32))
+        pt2 = tuple(np.round(pt2_arr).astype(np.int32))
         cv2.line(overlay, pt1, pt2, color, thickness, cv2.LINE_AA)
 
     # Draw points
-    for i, pt in enumerate(valid_pts):
+    valid_indices = np.where(valid)[0]
+    valid_pts = pts[valid].astype(np.int32)
+    for step_idx, pt in zip(valid_indices, valid_pts):
         # Vary point size based on time (larger = later)
-        r = point_radius + i // 4
+        r = point_radius + step_idx // 4
         cv2.circle(overlay, tuple(pt), r, color, -1, cv2.LINE_AA)
 
     # Alpha blend
@@ -963,14 +970,18 @@ def generate_viz_frames(
             best_idx = top_k_indices[0]
             best_trajectory = traj_pred[best_idx]  # (T, 2)
             gt_trajectory = future.numpy()  # (T, 2)
+            current_xy = sample["PAST"][-1, :2]
+            best_trajectory_vf = best_trajectory - current_xy
+            gt_trajectory_vf = gt_trajectory - current_xy
+            top_k_trajectories_vf = top_k_trajectories - current_xy[None, None, :]
 
             # Stitch front-3 panoramic image with trajectories drawn
             pano = _stitch_front3(
                 sample["CAM_IMAGES"],
                 sample["CALIBRATIONS"],
-                best_trajectory,
-                gt_trajectory,
-                top_k_trajectories,
+                best_trajectory_vf,
+                gt_trajectory_vf,
+                top_k_trajectories_vf,
             )
 
             # Calculate metrics
