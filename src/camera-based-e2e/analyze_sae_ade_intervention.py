@@ -231,8 +231,19 @@ def write_csv(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
         return
+    # Rows are heterogeneous: features with no active scenes omit the keys that
+    # only exist once an intervention runs (e.g. intervention_scale), so the
+    # header has to be the union over all rows, not just the first one.
+    fieldnames = []
+    seen = set()
+    for row in rows:
+        for key in row:
+            if key not in seen:
+                seen.add(key)
+                fieldnames.append(key)
+
     with path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
