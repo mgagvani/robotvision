@@ -9,3 +9,17 @@ dependencies = [
     "ipython>=8.23.0",
     "waymo-open-dataset-tf-2-12-0==1.6.7",
 ]
+
+[project.optional-dependencies]
+# Only needed by analyze_sae_visual_gen.py (stage 1 of the counterfactual
+# image-edit pipeline): object detection, VLM prompt generation, and the
+# diffusion image editor. Stage 2 (analyze_sae_visual_gen_pt2.py) and every
+# other SAE script run without these.
+visual-edits = [
+    "diffusers>=0.31",
+    "google-genai>=0.3",
+    "openai>=1.0",
+    "pillow>=10.0",
+    "python-dotenv>=1.0",
+    "ultralytics>=8.3",
+]
