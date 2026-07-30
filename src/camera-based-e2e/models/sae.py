@@ -191,7 +191,11 @@ class SparseAutoencoder(nn.Module):
     ) -> torch.Tensor:
         x_preprocessed_hat = self.decode_to_preprocessed(z)
         if self.sae_type == LEGACY_SAE_TYPE:
-            return x_preprocessed_hat
+            # restore_input undoes the legacy mean/std standardisation applied by
+            # preprocess_input when set_legacy_normalization() has been called, and
+            # is the identity otherwise. Returning the decoder output directly here
+            # would leave normalized-space tokens for every normalized legacy SAE.
+            return self.restore_input(x_preprocessed_hat, None)
 
         if preprocess_stats is None:
             if reference_x is None:
