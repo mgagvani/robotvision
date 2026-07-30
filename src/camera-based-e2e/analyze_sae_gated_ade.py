@@ -304,6 +304,79 @@ def summarize_best_rows(rows: list[dict]) -> list[dict]:
     return summary_rows
 
 
+def compute_reconstruction_baselines(
+    *,
+    token_tensor_cpu: torch.Tensor,
+    z_all_cpu: torch.Tensor,
+    past_cpu: torch.Tensor,
+    future_cpu: torch.Tensor,
+    sae,
+    planner_model,
+    lit_model,
+    sae_block: int,
+    dataset,
+    batch_size: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+    """Planner outputs for the *unmodified* SAE reconstruction of every sample.
+
+    SAE reconstruction is lossy, so replaying decode(encode(x)) through the
+    planner does not reproduce the original outputs. Measuring an intervention
+    against the original planner outputs therefore folds that reconstruction
+    drift into every reported delta - even alpha=0 would look like an effect.
+    These alpha=0 outputs are the correct reference: subtracting them isolates
+    the feature edit. They depend only on the sample, so compute them once.
+    """
+    selected_chunks, oracle_chunks, stat_chunks = [], [], {}
+
+    sae.eval()
+    planner_model.eval()
+    with torch.no_grad():
+        for start in range(0, len(token_tensor_cpu), batch_size):
+            batch_indices = torch.arange(start, min(start + batch_size, len(token_tensor_cpu)))
+            batch_x = token_tensor_cpu[batch_indices].to(device)
+            batch_future = future_cpu[batch_indices].to(device)
+            z_batch = z_all_cpu[batch_indices].to(device)
+
+            recon_query = sae.decode_to_input(z_batch, reference_x=batch_x)
+            if sae_block == DEFAULT_SAE_BLOCK:
+                batch_past = past_cpu[batch_indices].to(device)
+                out = planner_model.forward_from_planner_query_tok(recon_query, batch_past)
+            else:
+                batch = collate_dataset_indices(dataset, batch_indices)
+                replay_context = prepare_replay_context(planner_model, lit_model, batch, device=device)
+                out = planner_model.forward_from_block_query_tok(
+                    recon_query,
+                    replay_context["past"],
+                    replay_context["tokens"],
+                    start_block=sae_block,
+                )
+
+            selected_ade, oracle_ade = compute_selected_and_oracle_ade(
+                trajectory_flat=out["trajectory"],
+                scores=out["scores"],
+                future=batch_future,
+                num_proposals=planner_model.n_proposals,
+                horizon=planner_model.horizon,
+            )
+            out_stats = compute_output_stats(
+                trajectory_flat=out["trajectory"],
+                scores=out["scores"],
+                num_proposals=planner_model.n_proposals,
+                horizon=planner_model.horizon,
+            )
+            selected_chunks.append(selected_ade.detach().cpu())
+            oracle_chunks.append(oracle_ade.detach().cpu())
+            for name, value in out_stats.items():
+                stat_chunks.setdefault(name, []).append(value.detach().cpu())
+
+    return (
+        torch.cat(selected_chunks, dim=0),
+        torch.cat(oracle_chunks, dim=0),
+        {name: torch.cat(chunks, dim=0) for name, chunks in stat_chunks.items()},
+    )
+
+
 def evaluate_setting(
     *,
     feature_idx: int,
@@ -317,9 +390,9 @@ def evaluate_setting(
     z_all_cpu: torch.Tensor,
     past_cpu: torch.Tensor,
     future_cpu: torch.Tensor,
-    baseline_selected: torch.Tensor,
-    baseline_oracle: torch.Tensor,
-    baseline_stats_cpu: dict[str, torch.Tensor],
+    recon_selected: torch.Tensor,
+    recon_oracle: torch.Tensor,
+    recon_stats_cpu: dict[str, torch.Tensor],
     hard_mask_all: torch.Tensor,
     sae,
     planner_model,
@@ -331,7 +404,7 @@ def evaluate_setting(
     proxy_metric_quantiles: list[float],
     min_proxy_accept_count: int,
 ) -> tuple[dict, list[dict]]:
-    total_count = baseline_selected.numel()
+    total_count = recon_selected.numel()
     intervene_idx = intervene_idx.to(torch.long)
     intervened_count = int(intervene_idx.numel())
     gate_rate = intervened_count / total_count
@@ -406,8 +479,8 @@ def evaluate_setting(
         for start in range(0, intervened_count, batch_size):
             batch_indices = intervene_idx[start : start + batch_size]
             batch_future = future_cpu[batch_indices].to(device)
-            batch_baseline_selected = baseline_selected[batch_indices].to(device)
-            batch_baseline_oracle = baseline_oracle[batch_indices].to(device)
+            batch_baseline_selected = recon_selected[batch_indices].to(device)
+            batch_baseline_oracle = recon_oracle[batch_indices].to(device)
             batch_hard_mask = hard_mask_all[batch_indices]
 
             batch_x = token_tensor_cpu[batch_indices].to(device)
@@ -462,7 +535,7 @@ def evaluate_setting(
             delta_oracle_chunks.append(delta_oracle)
 
             for proxy_name, stat_name, sign in PROXY_RULE_SPECS:
-                baseline_stat = baseline_stats_cpu[stat_name][batch_indices].to(device)
+                baseline_stat = recon_stats_cpu[stat_name][batch_indices].to(device)
                 directional_values = sign * (out_stats[stat_name] - baseline_stat)
                 directional_value_chunks[proxy_name].append(directional_values.detach().cpu())
 
@@ -653,6 +726,30 @@ if __name__ == "__main__":
             index_file=args.index_file,
         )
 
+    # Reference outputs for the unmodified reconstruction (alpha = 0). Deltas are
+    # measured against these rather than the original planner outputs so that
+    # lossy SAE reconstruction cancels instead of being reported as an effect.
+    recon_selected, recon_oracle, recon_stats_cpu = compute_reconstruction_baselines(
+        token_tensor_cpu=token_tensor,
+        z_all_cpu=z_all_cpu,
+        past_cpu=past_cpu,
+        future_cpu=future_cpu,
+        sae=sae,
+        planner_model=planner_model,
+        lit_model=lit_model,
+        sae_block=args.sae_block,
+        dataset=dataset,
+        batch_size=args.batch_size,
+        device=device,
+    )
+    recon_drift = float((recon_selected - baseline_selected).abs().mean().item())
+    print(
+        f"SAE reconstruction drift vs original planner: "
+        f"mean |delta selected ADE| = {recon_drift:.4f} m "
+        f"(this is what measuring against the original baseline would have added)",
+        flush=True,
+    )
+
     all_indices = torch.arange(len(token_tensor))
     rows = []
     proxy_rows = [] if output_proxy_csv is not None else None
@@ -695,9 +792,9 @@ if __name__ == "__main__":
                     z_all_cpu=z_all_cpu,
                     past_cpu=past_cpu,
                     future_cpu=future_cpu,
-                    baseline_selected=baseline_selected,
-                    baseline_oracle=baseline_oracle,
-                    baseline_stats_cpu=baseline_stats_cpu,
+                    recon_selected=recon_selected,
+                    recon_oracle=recon_oracle,
+                    recon_stats_cpu=recon_stats_cpu,
                     hard_mask_all=hard_mask_all,
                     sae=sae,
                     planner_model=planner_model,
