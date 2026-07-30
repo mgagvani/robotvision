@@ -25,10 +25,19 @@ INTENT_NAMES = {
 
 
 def safe_div(num: torch.Tensor, den: torch.Tensor) -> torch.Tensor:
-    out = torch.zeros_like(num)
-    mask = den != 0
-    out[mask] = num[mask] / den[mask]
-    return out
+    """Elementwise num/den, yielding 0 wherever den == 0.
+
+    Broadcasts, so `den` may be a 0-dim tensor - several call sites pass scalar
+    counts. The previous boolean-mask implementation raised a RuntimeError for a
+    0-dim zero denominator, i.e. exactly the divide-by-zero case it existed to
+    guard (e.g. an intent class holding every sample leaves other_n == 0).
+    """
+    den = torch.as_tensor(den, dtype=num.dtype, device=num.device)
+    nonzero = den != 0
+    # Substitute 1 in the zero slots so the division itself never produces
+    # inf/nan, then select the zero fill for those positions.
+    safe_den = torch.where(nonzero, den, torch.ones_like(den))
+    return torch.where(nonzero, num / safe_den, torch.zeros_like(num))
 def compute_stats(
     model: SparseAutoencoder,
     token_tensor: torch.Tensor,
