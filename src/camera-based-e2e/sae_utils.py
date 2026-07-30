@@ -192,11 +192,23 @@ def build_default_lit_model(model_checkpoint_path: str) -> LitModel:
 def resolve_sae_checkpoint_path(path: str | Path, sae_block: int) -> Path:
     checkpoint_path = Path(path).expanduser()
     if checkpoint_path.is_dir():
-        candidate = checkpoint_path / f"sae_block_{sae_block}.pt"
-        if candidate.exists():
-            return candidate
+        # Two layouts exist in the wild and both must resolve:
+        #   * a flat directory of per-block files, `sae_block_{n}.pt`
+        #   * a train_sae.py run root or model dir, which infer_sae_paths()
+        #     addresses as `model/block_{n}/sae_checkpoint.pt`
+        # Only accepting the first silently rejected valid run roots.
+        candidates = (
+            checkpoint_path / f"sae_block_{sae_block}.pt",
+            checkpoint_path / "sae_checkpoint.pt",
+            checkpoint_path / f"block_{sae_block}" / "sae_checkpoint.pt",
+            infer_sae_model_dir(checkpoint_path, sae_block) / "sae_checkpoint.pt",
+        )
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        tried = "\n  ".join(str(c) for c in candidates)
         raise FileNotFoundError(
-            f"Could not find sae_block_{sae_block}.pt inside SAE checkpoint directory {checkpoint_path}"
+            f"No SAE checkpoint for block {sae_block} under {checkpoint_path}. Tried:\n  {tried}"
         )
     if checkpoint_path.suffix == ".pt":
         return checkpoint_path
