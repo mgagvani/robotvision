@@ -1,5 +1,6 @@
 import argparse
 import csv
+import json
 from pathlib import Path
 
 import torch # type: ignore
@@ -194,6 +195,70 @@ def compute_feature_correlation(
     corr.fill_diagonal_(0.0)
 
     return corr.cpu(), kept_features.cpu(), active_frac.cpu()
+
+
+def write_run_config(
+    *,
+    output_dir: Path,
+    args,
+    token_key: str,
+    ckpt_path,
+    token_path,
+    num_samples: int,
+    latent_dim: int,
+    kept_feature_count: int,
+    cluster_sizes: list[int],
+    outputs: list[Path],
+) -> Path:
+    """Record every result-affecting setting alongside the CSVs.
+
+    Output filenames encode only sae_block, split and corr_threshold, but the
+    clustering also depends on use_binary, the active-frequency bounds,
+    min_cluster_size and the top-k limits. Runs differing only in those
+    silently overwrite each other, and the surviving CSVs carry no record of
+    what produced them - recovering whether a result came from binary
+    co-activation or from activation magnitudes then means re-running both.
+    """
+    config_path = output_dir / (
+        f"run_config_block_{args.sae_block}_{args.split}_thresh{args.corr_threshold}.json"
+    )
+    payload = {
+        # everything here changes the numbers
+        "parameters": {
+            "sae_block": args.sae_block,
+            "split": args.split,
+            "use_binary": bool(args.use_binary),
+            "correlation_input": (
+                "binary_coactivation" if args.use_binary else "activation_magnitude"
+            ),
+            "corr_threshold": args.corr_threshold,
+            "min_cluster_size": args.min_cluster_size,
+            "min_active_frac": args.min_active_frac,
+            "max_active_frac": args.max_active_frac,
+            "top_k_scenes": args.top_k_scenes,
+            "top_k_pairs": args.top_k_pairs,
+        },
+        "inputs": {
+            "run_root": str(Path(args.run_root).resolve()),
+            "sae_checkpoint": str(ckpt_path),
+            "token_path": str(token_path),
+            "token_key": token_key,
+        },
+        # enough of the result to spot a mismatch without opening the CSVs
+        "results": {
+            "num_samples": num_samples,
+            "latent_dim": latent_dim,
+            "kept_features": kept_feature_count,
+            "num_clusters": len(cluster_sizes),
+            "cluster_sizes": cluster_sizes,
+        },
+        "outputs": [p.name for p in outputs],
+    }
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with config_path.open("w") as f:
+        json.dump(payload, f, indent=2)
+        f.write("\n")
+    return config_path
 
 
 def connected_components_from_corr(
@@ -525,12 +590,26 @@ def main() -> None:
     write_csv(cluster_csv, cluster_rows)
     write_csv(top_scene_csv, top_scene_rows)
 
+    config_json = write_run_config(
+        output_dir=output_dir,
+        args=args,
+        token_key=token_key,
+        ckpt_path=bundle["ckpt_path"],
+        token_path=bundle["token_path"],
+        num_samples=int(z_all.shape[0]),
+        latent_dim=int(z_all.shape[1]),
+        kept_feature_count=int(kept_features.numel()),
+        cluster_sizes=[len(features) for features in clusters],
+        outputs=[freq_csv, pair_csv, cluster_csv, top_scene_csv],
+    )
+
     print("")
     print("Done.")
     print(f"Saved feature frequencies to: {freq_csv}")
     print(f"Saved top correlated pairs to: {pair_csv}")
     print(f"Saved cluster summaries to: {cluster_csv}")
     print(f"Saved top scenes per cluster to: {top_scene_csv}")
+    print(f"Saved run configuration to: {config_json}")
 
     print("")
     print("Interpretation step:")
