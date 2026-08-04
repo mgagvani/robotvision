@@ -217,3 +217,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Model weights & SAE artifacts — publish as release artifacts, never as git blobs
+*.ckpt
+*.pt
+sae_checkpoints/

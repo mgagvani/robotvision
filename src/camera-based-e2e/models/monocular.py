@@ -116,17 +116,15 @@ class DeepMonocularModel(nn.Module):
         traj_xy = torch.stack(xy_steps, dim=2)  # (B, K, T, 2)
         return traj_xy, traj_xy.reshape(traj_xy.size(0), -1), accel, omega  # (B, K*T*2)
 
-    def forward(self, x):
-        # Copied from MonocularModel
-        # past: (B, 16, 6), intent: int
-        past, images, intent = x['PAST'], x['IMAGES'], x['INTENT']
-        
+    def prepare_visual_tokens(
+        self,
+        images,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Ref: https://github.com/waymo-research/waymo-open-dataset/blob/5f8a1cd42491210e7de629b6f8fc09b65e0cbe99/src/waymo_open_dataset/dataset.proto#L50%20%20order%20=%20[2,%201,%203]
         front_cam = images[1]
 
         # Doesn't need no_grad b/c DINO/SAMFeatures will freeze if needed
         feats_vit = self.features(front_cam)  # list or tensor
-
         if len(feats_vit) == 1 and isinstance(feats_vit, list):
             feats_vit = feats_vit[0]
 
@@ -136,31 +134,76 @@ class DeepMonocularModel(nn.Module):
         output_depth = F.softplus(self.depth_gen(feats).squeeze(1))  # (B, 128, 128)
 
         # tokens: handle list of features or single tensor
-        # TODO: is this made redundant by if statement above?
         if isinstance(feats, (list, tuple)):
             tokens = torch.cat([f.flatten(2) for f in feats], dim=1)  # (B, C_total, N)
         else:
             tokens = feats.flatten(2)  # (B, C, N)
-        tokens = torch.permute(tokens, (0, 2, 1)) + self.positional_encoding # (B, N, C_total)
-        
-        # copy procedure to build query_0 from MonocularModel
+        tokens = torch.permute(tokens, (0, 2, 1)) + self.positional_encoding  # (B, N, C_total)
+        return tokens, output_depth
+
+    def prepare_initial_query(
+        self,
+        past: torch.Tensor,
+        intent: torch.Tensor,
+    ) -> torch.Tensor:
         intent_onehot = F.one_hot((intent - 1).long(), num_classes=3).float()
         past_flat = past.view(past.size(0), -1)
-        query: torch.Tensor = self.query_init(torch.cat([intent_onehot, past_flat], dim=1)).unsqueeze(1)
+        return self.query_init(torch.cat([intent_onehot, past_flat], dim=1)).unsqueeze(1)
 
-        for block in self.blocks:
-            query = block(query, tokens)
+    def forward_transformer_blocks(
+        self,
+        query: torch.Tensor,
+        tokens: torch.Tensor,
+        *,
+        start_block: int = 0,
+        return_block_outputs: bool = False,
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        block_outputs = []
+        for block_idx in range(start_block, len(self.blocks)):
+            query = self.blocks[block_idx](query, tokens)
+            if return_block_outputs:
+                block_outputs.append(query)
+        return query, block_outputs
+
+    def collect_block_query_tokens(
+        self,
+        past: torch.Tensor,
+        images,
+        intent: torch.Tensor,
+    ) -> tuple[list[torch.Tensor], torch.Tensor, torch.Tensor]:
+        tokens, output_depth = self.prepare_visual_tokens(images)
+        query = self.prepare_initial_query(past, intent)
+        _, block_outputs = self.forward_transformer_blocks(
+            query,
+            tokens,
+            return_block_outputs=True,
+        )
+        return block_outputs, tokens, output_depth
+
+    def forward_from_planner_query_tok(
+        self,
+        planner_query_tok: torch.Tensor,
+        past: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Run proposal decoding + scoring from a (possibly edited) planner query token."""
+        query = planner_query_tok
+        if query.ndim == 3:
+            if query.size(1) != 1:
+                raise ValueError(f"Expected query shape (B, 1, C), got {query.shape}")
+            query = query.squeeze(1)
+        elif query.ndim != 2:
+            raise ValueError(f"Expected query shape (B, C) or (B, 1, C), got {query.shape}")
 
         # predict (acceleration, angular velocity) for each timestep
         # and roll it out using the kinematic bicycle model
-        control_pred = self.traj_decoder(query.squeeze(1)).view(
+        control_pred = self.traj_decoder(query).view(
             query.size(0), self.n_proposals, self.horizon, 2
         )  # (B, K, T, 2)
         traj_xy, traj_pred, accel, omega = self.bicycle_model(control_pred, past)  # (B, K, T*2)
 
         traj_pred_flat = traj_xy.reshape(traj_xy.size(0), self.n_proposals, -1)  # (B, K, T*2)
         traj_feat: torch.Tensor = self.traj_features(traj_pred_flat.detach())  # (B, K, C)
-        query_for_score = query.squeeze(1).detach()[:, torch.newaxis, :].expand(-1, self.n_proposals, -1)  # (B, K, C)
+        query_for_score = query.detach()[:, torch.newaxis, :].expand(-1, self.n_proposals, -1)  # (B, K, C)
         score_in = torch.cat([query_for_score, traj_feat], dim=-1)  # (B, K, 2C)
         score_pred = self.score_decoder(score_in).squeeze(-1)  # (B, K)
 
@@ -169,6 +212,51 @@ class DeepMonocularModel(nn.Module):
             "trajectory_flat": traj_pred_flat,
             "query_for_score": query_for_score,
             "scores": score_pred,
-            "depth": output_depth,
             "controls": torch.stack([accel, omega], dim=-1).reshape(query.size(0), -1),
+            "planner_query_tok": query,
         }
+
+    def forward_from_block_query_tok(
+        self,
+        planner_query_tok: torch.Tensor,
+        past: torch.Tensor,
+        tokens: torch.Tensor,
+        *,
+        start_block: int,
+    ) -> dict[str, torch.Tensor]:
+        """Re-enter the decoder stack mid-way, from the output of block `start_block`."""
+        query = planner_query_tok
+        if query.ndim == 2:
+            query = query.unsqueeze(1)
+        elif query.ndim != 3:
+            raise ValueError(
+                f"Expected planner_query_tok shape (B, C) or (B, 1, C), got {query.shape}"
+            )
+
+        if start_block < 0 or start_block >= len(self.blocks):
+            raise ValueError(f"start_block must be in [0, {len(self.blocks) - 1}], got {start_block}")
+
+        query, _ = self.forward_transformer_blocks(
+            query,
+            tokens,
+            start_block=start_block + 1,
+            return_block_outputs=False,
+        )
+        return self.forward_from_planner_query_tok(query, past)
+
+    def forward(self, x, return_block_tokens: bool = False):
+        # past: (B, 16, 6), intent: int
+        past, images, intent = x['PAST'], x['IMAGES'], x['INTENT']
+
+        block_outputs, tokens, output_depth = self.collect_block_query_tokens(
+            past,
+            images,
+            intent,
+        )
+        query = block_outputs[-1]
+        out = self.forward_from_planner_query_tok(query, past)
+        out["depth"] = output_depth
+        if return_block_tokens:
+            for block_idx, block_query in enumerate(block_outputs):
+                out[f"planner_query_tok_block_{block_idx}"] = block_query.squeeze(1)
+        return out
