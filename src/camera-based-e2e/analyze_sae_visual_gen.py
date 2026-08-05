@@ -403,6 +403,54 @@ def generate_prompt(generator: str, scene_description: str, image: Image.Image) 
         return generate_local(scene_description, image)
     raise ValueError(f"Unknown generator: {generator}")
 
+RESUME_CONFIG_KEYS = ("index_file", "n_items", "camera_idx", "generator", "editor")
+
+def load_resume_state(manifest_path: Path, output_dir: Path, args) -> tuple[list[dict], set[int]]:
+    """Read an existing manifest and report which items need not be redone.
+
+    Returns the rows worth keeping and the dataset indices they cover. Rows are
+    dropped when they cannot be trusted: a truncated final line from a job that
+    died mid-write, or an "edited" row whose image is no longer on disk.
+    """
+    if not manifest_path.exists():
+        return [], set()
+
+    kept: list[dict] = []
+    completed: set[int] = set()
+    with manifest_path.open() as f:
+        for lineno, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                # A killed run leaves a partially written final line.
+                print(f"WARNING: discarding malformed manifest line {lineno}; that item will be redone")
+                continue
+
+            for key in RESUME_CONFIG_KEYS:
+                want = getattr(args, key)
+                if row.get(key) != want:
+                    raise ValueError(
+                        f"{manifest_path} was built with {key}={row.get(key)!r}, but this run "
+                        f"uses {want!r}. Resuming would mix incompatible settings; pass "
+                        f"--no-resume to start over, or use a different --output_dir."
+                    )
+
+            if row.get("status") == "edited":
+                edited_path = row.get("edited_path")
+                if not edited_path or not (output_dir / edited_path).exists():
+                    print(
+                        f"WARNING: dataset_idx={row.get('dataset_idx')} is marked edited but its "
+                        f"image is missing; that item will be redone"
+                    )
+                    continue
+
+            kept.append(row)
+            completed.add(int(row["dataset_idx"]))
+    return kept, completed
+
 def run_generate_edits(args) -> None:
     output_dir = Path(args.output_dir)
     edited_dir = output_dir / "edited"
@@ -419,15 +467,32 @@ def run_generate_edits(args) -> None:
     end_idx = min(args.start_idx + args.max_items, len(dataset))
     dataset_indices = list(range(args.start_idx, end_idx))
 
+    resume_rows, completed = load_resume_state(manifest_path, output_dir, args) if args.resume else ([], set())
+    pending = [dataset_idx for dataset_idx in dataset_indices if dataset_idx not in completed]
+    if completed:
+        print(f"Resuming: {len(completed)} items already done, {len(pending)} to go")
+    if not pending:
+        print(f"Nothing to do; manifest at {manifest_path} is already complete.")
+        return
+
+    # Rewrite the manifest from the rows worth keeping, so a truncated line or a
+    # row whose image vanished does not survive. Build it beside the original and
+    # move it into place, so an interruption here cannot lose the earlier work.
+    tmp_path = manifest_path.with_name(manifest_path.name + ".tmp")
+    with tmp_path.open("w") as f:
+        for row in resume_rows:
+            f.write(json.dumps(row) + "\n")
+    tmp_path.replace(manifest_path)
+
     pipeline = None
     bs = 16
 
     # Decode, detect, and edit one batch at a time. Holding every frame and every
     # YOLO Results for the whole run costs ~6 GB per 1k items (Results keeps its
     # own copy of the source frame), which OOM-killed a 5k-item run at 64 GB.
-    with manifest_path.open("w") as f:
-        for start in range(0, len(dataset_indices), bs):
-            batch_indices = dataset_indices[start : start + bs]
+    with manifest_path.open("a") as f:
+        for start in range(0, len(pending), bs):
+            batch_indices = pending[start : start + bs]
             batch_names, batch_images = [], []
             for dataset_idx in batch_indices:
                 sample = dataset[dataset_idx]
@@ -514,6 +579,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         choices=["firered", "qwen", "flux"],
         default="firered",
+    )
+    gen.add_argument(
+        "--resume",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep completed items from an existing manifest in --output_dir and only "
+             "generate the rest. --no-resume regenerates everything from scratch.",
     )
     gen.set_defaults(func=run_generate_edits)
     return parser
