@@ -440,8 +440,22 @@ def summarize_group(
     mean_abs_delta = abs_delta.mean(dim=0)
     std_delta = delta.std(dim=0, unbiased=False)
     stderr_delta = std_delta / (n ** 0.5)
-    paired_t = mean_delta / stderr_delta.clamp_min(1e-6)
-    cohen_dz = mean_delta / std_delta.clamp_min(1e-6)
+    # Both statistics need within-group variance. A singleton group has none by
+    # construction, and a zero-variance feature with a nonzero mean divides by the
+    # old 1e-6 clamp and reports a t in the millions for what is one observation.
+    # Report NaN for those rather than a number that reads as significant.
+    # A feature whose delta is identically zero keeps its 0: it did not move, which
+    # is an answer rather than an absence of one.
+    degenerate = std_delta <= 0
+    if n < 2:
+        undefined = torch.ones_like(std_delta, dtype=torch.bool)
+    else:
+        undefined = degenerate & (mean_delta != 0)
+    nan = torch.full_like(mean_delta, float("nan"))
+    safe_stderr = torch.where(degenerate, torch.ones_like(stderr_delta), stderr_delta)
+    safe_std = torch.where(degenerate, torch.ones_like(std_delta), std_delta)
+    paired_t = torch.where(undefined, nan, mean_delta / safe_stderr)
+    cohen_dz = torch.where(undefined, nan, mean_delta / safe_std)
     sign_consistency = torch.where(
         mean_delta >= 0,
         (delta > 0).float().mean(dim=0),
