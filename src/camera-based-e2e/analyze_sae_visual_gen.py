@@ -418,70 +418,74 @@ def run_generate_edits(args) -> None:
 
     end_idx = min(args.start_idx + args.max_items, len(dataset))
     dataset_indices = list(range(args.start_idx, end_idx))
-    images = []
-    samples = []
-    for dataset_idx in dataset_indices:
-        sample = dataset[dataset_idx]
-        samples.append(sample)
-        images.append(jpeg_tensor_to_image(sample["IMAGES_JPEG"][args.camera_idx]))
-
-    # Generate batches 
-    batches, bs = [], 16
-    for i in range(0, len(images), bs):
-        batches.append((images[i : i + bs], samples[i : i + bs], dataset_indices[i : i + bs]))
-
-    results = []
-    for batch_images, batch_samples, batch_indices in batches:
-         batch_results = inference_yolo(yolo_model, batch_images)
-         results.extend(batch_results)
 
     pipeline = None
+    bs = 16
 
+    # Decode, detect, and edit one batch at a time. Holding every frame and every
+    # YOLO Results for the whole run costs ~6 GB per 1k items (Results keeps its
+    # own copy of the source frame), which OOM-killed a 5k-item run at 64 GB.
     with manifest_path.open("w") as f:
-        for dataset_idx, sample, image, result in zip(dataset_indices, samples, images, results):
-            scene_description = yolo_scene_description(result)
-            raw_prompt = generate_prompt(args.generator, scene_description, image)
-            edit_plan = parse_edit_plan(raw_prompt)
-            prompt = edit_plan["prompt"]
+        for start in range(0, len(dataset_indices), bs):
+            batch_indices = dataset_indices[start : start + bs]
+            batch_names, batch_images = [], []
+            for dataset_idx in batch_indices:
+                sample = dataset[dataset_idx]
+                batch_names.append(sample["NAME"])
+                batch_images.append(jpeg_tensor_to_image(sample["IMAGES_JPEG"][args.camera_idx]))
 
-            row = {
-                "dataset_idx": dataset_idx,
-                "name": sample["NAME"],
-                "camera_idx": args.camera_idx,
-                "index_file": args.index_file,
-                "n_items": args.n_items,
-                "status": "no_change",
-                "edit_type": edit_plan["edit_type"],
-                "edit_direction": edit_plan["edit_direction"],
-                "prompt": prompt,
-                "scene_description": scene_description,
-                "generator": args.generator,
-                "editor": args.editor,
-                "edited_path": None,
-                "raw_generator_output": edit_plan.get("raw_generator_output"),
-            }
-            if "parse_error" in edit_plan:
-                row["parse_error"] = edit_plan["parse_error"]
+            # Reduce each Results to its description before the next batch is read,
+            # so the frames they carry can be freed.
+            batch_descriptions = [
+                yolo_scene_description(result)
+                for result in inference_yolo(yolo_model, batch_images)
+            ]
 
-            print(f"dataset_idx={dataset_idx} edit_type={row['edit_type']} direction={row['edit_direction']}")
-            print(prompt)
+            for dataset_idx, name, image, scene_description in zip(
+                batch_indices, batch_names, batch_images, batch_descriptions
+            ):
+                raw_prompt = generate_prompt(args.generator, scene_description, image)
+                edit_plan = parse_edit_plan(raw_prompt)
+                prompt = edit_plan["prompt"]
 
-            if row["edit_type"] != "no_change":
-                if pipeline is None:
-                    hf_home = os.getenv("HF_HOME")
-                    if hf_home is None:
-                        print("WARNING: HF_HOME is not set; diffusers will use its default cache.")
-                    pipeline = load_editor(args.editor)
-                edited_image = generate_edit_with_editor(args.editor, pipeline, image, prompt)
-                edited_path = edited_dir / f"{dataset_idx}.jpg"
-                edited_image.save(edited_path)
-                row["status"] = "edited"
-                row["edited_path"] = str(edited_path.relative_to(output_dir))
-            else:
-                print(f"No change for dataset_idx={dataset_idx}, skipping edit.")
+                row = {
+                    "dataset_idx": dataset_idx,
+                    "name": name,
+                    "camera_idx": args.camera_idx,
+                    "index_file": args.index_file,
+                    "n_items": args.n_items,
+                    "status": "no_change",
+                    "edit_type": edit_plan["edit_type"],
+                    "edit_direction": edit_plan["edit_direction"],
+                    "prompt": prompt,
+                    "scene_description": scene_description,
+                    "generator": args.generator,
+                    "editor": args.editor,
+                    "edited_path": None,
+                    "raw_generator_output": edit_plan.get("raw_generator_output"),
+                }
+                if "parse_error" in edit_plan:
+                    row["parse_error"] = edit_plan["parse_error"]
 
-            f.write(json.dumps(row) + "\n")
-            f.flush()
+                print(f"dataset_idx={dataset_idx} edit_type={row['edit_type']} direction={row['edit_direction']}")
+                print(prompt)
+
+                if row["edit_type"] != "no_change":
+                    if pipeline is None:
+                        hf_home = os.getenv("HF_HOME")
+                        if hf_home is None:
+                            print("WARNING: HF_HOME is not set; diffusers will use its default cache.")
+                        pipeline = load_editor(args.editor)
+                    edited_image = generate_edit_with_editor(args.editor, pipeline, image, prompt)
+                    edited_path = edited_dir / f"{dataset_idx}.jpg"
+                    edited_image.save(edited_path)
+                    row["status"] = "edited"
+                    row["edited_path"] = str(edited_path.relative_to(output_dir))
+                else:
+                    print(f"No change for dataset_idx={dataset_idx}, skipping edit.")
+
+                f.write(json.dumps(row) + "\n")
+                f.flush()
 
     print(f"Saved manifest to {manifest_path}")
 
