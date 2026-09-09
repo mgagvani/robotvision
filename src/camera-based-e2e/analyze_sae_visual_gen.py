@@ -76,11 +76,8 @@ import json
 import os
 from pathlib import Path
 
-import dotenv
 import torch
-from diffusers import QwenImageEditPipeline, Flux2KleinPipeline, QwenImageEditPlusPipeline
-from google import genai
-from google.genai import types
+from diffusers import Flux2KleinPipeline, QwenImageEditPipeline, QwenImageEditPlusPipeline
 from openai import OpenAI
 from PIL import Image
 from ultralytics import YOLO
@@ -245,31 +242,6 @@ def yolo_scene_description(result) -> str:
         lines.append(f"{name} conf={float(conf.item()):.3f} at {xyxy[j].tolist()}")
     return "\n".join(lines)
 
-def generate_gemini(scene_description: str):
-    # Load Gemini API key from .env file
-    dotenv.load_dotenv()
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is not set. Add it to .env or export it before running.")
-    genai_client = genai.Client(api_key=api_key)
-
-    # Generate prompt for image editing model
-    response = genai_client.models.generate_content(
-        model="gemini-flash-lite-latest",
-        contents=[
-            types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=scene_description)],
-            ),
-        ],
-        config=types.GenerateContentConfig(
-            system_instruction=PROMPT,
-            thinking_config=types.ThinkingConfig(thinking_level="MINIMAL"),
-        ),
-    )
-
-    return response.text
-
 def image_to_url(image: Image.Image) -> str:
     buffered = io.BytesIO()
     if image.mode != "RGB":
@@ -396,13 +368,6 @@ def generate_edit_with_editor(editor_name: str, pipeline, image: Image.Image, pr
         return generate_flux2klein_edit(pipeline, image, prompt)
     raise ValueError(f"Unknown editor: {editor_name}")
 
-def generate_prompt(generator: str, scene_description: str, image: Image.Image) -> str:
-    if generator == "gemini":
-        return generate_gemini(scene_description)
-    if generator == "local":
-        return generate_local(scene_description, image)
-    raise ValueError(f"Unknown generator: {generator}")
-
 RESUME_CONFIG_KEYS = ("index_file", "n_items", "camera_idx", "generator", "editor")
 
 def load_resume_state(manifest_path: Path, output_dir: Path, args) -> tuple[list[dict], set[int]]:
@@ -509,7 +474,7 @@ def run_generate_edits(args) -> None:
             for dataset_idx, name, image, scene_description in zip(
                 batch_indices, batch_names, batch_images, batch_descriptions
             ):
-                raw_prompt = generate_prompt(args.generator, scene_description, image)
+                raw_prompt = generate_local(scene_description, image)
                 edit_plan = parse_edit_plan(raw_prompt)
                 prompt = edit_plan["prompt"]
 
@@ -565,15 +530,15 @@ def build_parser() -> argparse.ArgumentParser:
     gen.add_argument("--n_items", type=int, default=5_000)
     gen.add_argument("--start_idx", type=int, default=0)
     gen.add_argument("--max_items", type=int, default=10)
-    gen.add_argument("--camera_idx", type=int, default=1)
-    gen.add_argument("--yolo_model", type=str, default="yolo26x.pt")
     gen.add_argument(
-        "--generator",
-        type=str,
-        choices=["local", "gemini"],
-        default="local",
-        help="Prompt generator backend. Assumes local LLM is already running for --generator local.",
+        "--camera_idx",
+        type=int,
+        choices=[1],
+        default=1,
+        help="Camera to edit. Only the front camera (1), which is consumed by the "
+             "planner, is supported.",
     )
+    gen.add_argument("--yolo_model", type=str, default="yolo26x.pt")
     gen.add_argument(
         "--editor",
         type=str,
@@ -587,7 +552,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep completed items from an existing manifest in --output_dir and only "
              "generate the rest. --no-resume regenerates everything from scratch.",
     )
-    gen.set_defaults(func=run_generate_edits)
+    gen.set_defaults(func=run_generate_edits, generator="local")
     return parser
 
 if __name__ == "__main__":

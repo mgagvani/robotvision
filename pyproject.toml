@@ -16,10 +16,8 @@ dependencies = [
 # diffusion image editor. Stage 2 (analyze_sae_visual_gen_pt2.py) and every
 # other SAE script run without these.
 visual-edits = [
-    "diffusers>=0.31",
-    "google-genai>=0.3",
+    "diffusers>=0.37.1",
     "openai>=1.0",
     "pillow>=10.0",
-    "python-dotenv>=1.0",
     "ultralytics>=8.3",
 ]
