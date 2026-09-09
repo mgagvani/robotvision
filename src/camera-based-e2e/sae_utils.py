@@ -250,6 +250,12 @@ def load_model_and_sae(
     model = build_default_lit_model(model_checkpoint_path)
     resolved_sae_checkpoint_path = resolve_sae_checkpoint_path(sae_checkpoint_path, block_idx)
     sae_checkpoint = torch.load(resolved_sae_checkpoint_path, map_location="cpu")
+    checkpoint_block_idx = sae_checkpoint.get("block_index")
+    if checkpoint_block_idx is not None and int(checkpoint_block_idx) != block_idx:
+        raise ValueError(
+            f"SAE checkpoint {resolved_sae_checkpoint_path} was trained for block "
+            f"{checkpoint_block_idx}, not requested block {block_idx}."
+        )
     sae = build_sae_from_checkpoint(sae_checkpoint)
     sae.eval()
 
