@@ -28,13 +28,35 @@ DRVLA_SOURCE_URLS = (
 class ActivationCapture:
     def __init__(self) -> None:
         self.activations: torch.Tensor | None = None
+        self._handle = None
 
     def clear(self) -> None:
         self.activations = None
 
+    def register(self, module) -> "ActivationCapture":
+        """Attach to `module` and retain the handle so the hook can be removed."""
+        self.remove()
+        self._handle = module.register_forward_hook(self)
+        return self
+
+    def remove(self) -> None:
+        if self._handle is not None:
+            self._handle.remove()
+            self._handle = None
+
     def __call__(self, module, inputs, output) -> None:
         del module, inputs
         self.activations = output.detach()
+
+
+def freeze_module(module) -> None:
+    for param in module.parameters():
+        param.requires_grad = False
+
+
+def set_eval_mode(*modules) -> None:
+    for module in modules:
+        module.eval()
 
 
 def planner_token_key(block_idx: int) -> str:
@@ -89,6 +111,35 @@ def infer_sae_paths(run_root: Path, split: str, sae_block: int) -> tuple[Path, P
     return ckpt_path, token_path, None
 
 
+def normalize_compiled_state_dict(state_dict: dict, module) -> dict:
+    """Reconcile ``torch.compile``'s ``._orig_mod.`` key prefixes with `module`.
+
+    A checkpoint saved from a compiled SAE carries ``encoder._orig_mod.weight``
+    where an eager module expects ``encoder.weight`` (and vice versa). Loading
+    across that boundary silently drops every tensor under ``strict=False``,
+    leaving a randomly initialised SAE that still "loads" successfully.
+    """
+    state_compiled = any("._orig_mod." in key for key in state_dict)
+    module_compiled = any("._orig_mod." in key for key in module.state_dict())
+    if state_compiled == module_compiled:
+        return state_dict
+
+    normalized = {}
+    for key, value in state_dict.items():
+        for prefix in ("encoder.", "decoder."):
+            if module_compiled:
+                if key.startswith(prefix):
+                    key = key.replace(prefix, f"{prefix}_orig_mod.", 1)
+                    break
+            else:
+                compiled_prefix = f"{prefix}_orig_mod."
+                if key.startswith(compiled_prefix):
+                    key = key.replace(compiled_prefix, prefix, 1)
+                    break
+        normalized[key] = value
+    return normalized
+
+
 def build_sae_from_checkpoint(ckpt: dict, legacy_norm: dict | None = None) -> SparseAutoencoder:
     sae_type = ckpt.get("sae_type", LEGACY_SAE_TYPE)
     if sae_type == TOPK_AUX_SAE_TYPE:
@@ -109,7 +160,7 @@ def build_sae_from_checkpoint(ckpt: dict, legacy_norm: dict | None = None) -> Sp
             sae_type=LEGACY_SAE_TYPE,
             use_encoder_bias=True,
         )
-    model.load_state_dict(ckpt["state_dict"], strict=False)
+    model.load_state_dict(normalize_compiled_state_dict(ckpt["state_dict"], model), strict=False)
     if legacy_norm is not None:
         model.set_legacy_normalization(
             mean=legacy_norm["mean"],
@@ -199,12 +250,16 @@ def load_model_and_sae(
     model = build_default_lit_model(model_checkpoint_path)
     resolved_sae_checkpoint_path = resolve_sae_checkpoint_path(sae_checkpoint_path, block_idx)
     sae_checkpoint = torch.load(resolved_sae_checkpoint_path, map_location="cpu")
+    checkpoint_block_idx = sae_checkpoint.get("block_index")
+    if checkpoint_block_idx is not None and int(checkpoint_block_idx) != block_idx:
+        raise ValueError(
+            f"SAE checkpoint {resolved_sae_checkpoint_path} was trained for block "
+            f"{checkpoint_block_idx}, not requested block {block_idx}."
+        )
     sae = build_sae_from_checkpoint(sae_checkpoint)
     sae.eval()
 
-    capture = ActivationCapture()
-    target_layer = get_sae_target_layer(model, block_idx)
-    target_layer.register_forward_hook(capture)
+    capture = ActivationCapture().register(get_sae_target_layer(model, block_idx))
 
     if device is not None:
         model = model.to(device)
