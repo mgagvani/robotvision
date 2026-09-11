@@ -39,6 +39,12 @@ Checkpoints: `PLANNER_CHECKPOINT` is the paper's SMTS checkpoint
 SAE run root: `tokens/planner_tokens_{train,val}.pt` from step 4 and `model/block_{n}/sae_checkpoint.pt`
 from step 5 (copy the shipped SAEs there to skip step 5).
 
+Every SAE analysis reads `$RUN_ROOT/tokens/planner_tokens_val.pt`, so that file must have been
+extracted from the same planner checkpoint the SAEs were trained on (step 4 with
+`PLANNER_CHECKPOINT`). A token cache from any other checkpoint silently changes every
+downstream number: with the paper checkpoint the block-3 activation filter keeps 257 of 384
+features, matching the paper's 258; with a stale cache it keeps 192.
+
 ## Reproducing the paper
 
 Submit from the repository root after `source paths.env`. Every script accepts overrides through
