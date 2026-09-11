@@ -79,17 +79,17 @@ flags with `--help`.
 | Artifact | Why | How to get it |
 |---|---|---|
 | WOD-E2E v1.0.0 TFRecords (1.5 TB) | everything | Waymo download under its license |
-| `camera-e2e-epoch=04-val_loss=2.90.ckpt` (260 MB) | every SAE experiment reads this planner | released with the paper; retraining gives a similar but not identical model |
+| `camera-e2e-epoch=04-val_loss=2.90.ckpt` (260 MB) | every SAE experiment reads this planner | [mgagvani/mech-interp-for-e2e-driving](https://huggingface.co/mgagvani/mech-interp-for-e2e-driving); retraining gives a similar but not identical model |
 | `sae_checkpoints/*.pt` | the paper's SAEs | in this repository |
-| `visual_gen_1000/` (73 MB: manifest, edited images, `sae_analysis/`) | steps 9 to 11 exactly as in the paper | released with the paper; stage 1 is a sampled VLM plus diffusion pipeline and will not regenerate the same edits |
-| GTRS / DrivoR sweep checkpoints (20 GB) | exact ADE table and RFS rows | released with the paper, or retrain with step 1c (numbers move at the second decimal) |
+| `visual_gen_1000/` (73 MB: manifest, edited images, `sae_analysis/`) | steps 9 to 11 exactly as in the paper | same Hub repo, `counterfactual_edits/`; stage 1 is a sampled VLM plus diffusion pipeline and will not regenerate the same edits |
+| GTRS / DrivoR sweep checkpoints (2.6 GB for the ten table rows) | exact ADE table and RFS rows | not published; retrain with step 1c (numbers move at the second decimal) |
 | Perception Encoder and Depth-Anything-V2-Small weights | training and token extraction | auto-downloaded from Hugging Face; pre-populate the cache on clusters whose compute nodes have no internet (see `paths.env`) |
 | Waymo challenge account | Rater Feedback Score | scoring happens on Waymo's server |
 | Qwen3.5 checkpoint, FireRed-Image-Edit, YOLO26x weights | stage 1 of the edits only | Hugging Face / Ultralytics |
 
-All of these except the TFRecords are published on the Hugging Face Hub; `python artifacts.py download --org <org>`
-places them where `paths.env` points (planner and SAEs into `RUN_ROOT`, baselines into `CHECKPOINT_DIR`,
-edits into `VISUAL_GEN_ROOT`). `python artifacts.py upload` is how they were published.
+`python artifacts.py download` fetches the Hub repo and links the planner and SAEs into `RUN_ROOT` and the
+edits into `VISUAL_GEN_ROOT`; then run step 4 to build the token caches. `python artifacts.py upload` is how
+the repo was published.
 
 Exactness: token extraction, SAE analyses, ADE evaluation, and the figures are deterministic
 given the artifacts above (validated bit-for-bit against the pre-release code). Planner and SAE
