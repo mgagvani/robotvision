@@ -87,6 +87,10 @@ flags with `--help`.
 | Waymo challenge account | Rater Feedback Score | scoring happens on Waymo's server |
 | Qwen3.5 checkpoint, FireRed-Image-Edit, YOLO26x weights | stage 1 of the edits only | Hugging Face / Ultralytics |
 
+All of these except the TFRecords are published on the Hugging Face Hub; `python artifacts.py download --org <org>`
+places them where `paths.env` points (planner and SAEs into `RUN_ROOT`, baselines into `CHECKPOINT_DIR`,
+edits into `VISUAL_GEN_ROOT`). `python artifacts.py upload` is how they were published.
+
 Exactness: token extraction, SAE analyses, ADE evaluation, and the figures are deterministic
 given the artifacts above (validated bit-for-bit against the pre-release code). Planner and SAE
 training use fixed seeds but multi-GPU bf16 training is not bit-reproducible. The

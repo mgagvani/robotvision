@@ -18,6 +18,7 @@ dependencies = [
     "protobuf",
     "tqdm",
     "wandb",
+    "huggingface-hub",
 ]
 
 [project.optional-dependencies]
