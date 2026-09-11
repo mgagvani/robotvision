@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from loader import WaymoE2E
-from models.base_model import collate_with_images
+from models.base_model import collate_for_model
 from models.checkpoint_loader import load_model_from_checkpoint
 import os
 import argparse
@@ -185,17 +185,16 @@ if __name__ == "__main__":
     test_dataset = WaymoE2E(
         indexFile="index_test.pkl", data_dir=args.data_dir, n_items=None
     )
+    model = load_model_from_checkpoint(args.checkpoint, model_type=args.model_type)
+    device = next(model.parameters()).device
     test_loader = DataLoader(
         test_dataset,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        collate_fn=collate_with_images,
+        collate_fn=collate_for_model(model),
         persistent_workers=False,
         pin_memory=False,
     )
-
-    model = load_model_from_checkpoint(args.checkpoint, model_type=args.model_type)
-    device = next(model.parameters()).device
 
     predictions = generate_submission_data(model, test_loader, device=device)
     method_name = args.unique_method_name or f"{args.model_type}_waymo"

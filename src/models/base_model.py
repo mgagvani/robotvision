@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 import torchvision
+import functools
 from dataclasses import asdict, is_dataclass
 
 from .losses.depth_loss import DepthLoss
@@ -448,6 +449,11 @@ class LitModel(pl.LightningModule):
     def validation_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, "val")
     
+def collate_for_model(model):
+    """collate_with_images bound to the cameras `model` reads (front only unless its cfg says otherwise)."""
+    return functools.partial(collate_with_images, cam_idxs=tuple(getattr(model.cfg, "cam_idxs_used", (1,))))
+
+
 def collate_with_images(batch, cam_idxs=(1,)):
     """Collate that CPU-decodes requested cameras in the dataloader worker."""
     past = [torch.as_tensor(b["PAST"], dtype=torch.float32) for b in batch]

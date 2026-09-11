@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 
 from loader import WaymoE2E
-from models.base_model import collate_with_images
+from models.base_model import collate_for_model
 from models.checkpoint_loader import load_model_from_checkpoint
 
 
@@ -46,18 +46,18 @@ def evaluate_checkpoint(
     model_type: str = "auto",
 ) -> dict[str, float | int | str]:
     dataset = WaymoE2E(indexFile="index_val.pkl", data_dir=data_dir, n_items=val_items)
-    loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=batch_size,
-        num_workers=0,
-        collate_fn=collate_with_images,
-        persistent_workers=False,
-        pin_memory=False,
-    )
     model = load_model_from_checkpoint(
         checkpoint_path.as_posix(),
         device=device,
         model_type=model_type,
+    )
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=0,
+        collate_fn=collate_for_model(model),
+        persistent_workers=False,
+        pin_memory=False,
     )
 
     total_count = 0

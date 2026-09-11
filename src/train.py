@@ -35,7 +35,7 @@ from pathlib import Path
 import os
 
 from loader import WaymoE2E
-from models.base_model import LitModel, collate_with_images
+from models.base_model import LitModel, collate_for_model
 from models.drivor import DrivoRModel
 from models.feature_extractors import SAMFeatures
 from models.gtrs import GTRSModel
@@ -85,31 +85,6 @@ if __name__ == "__main__":
 
     pl.seed_everything(42, workers=True)
 
-    # Data
-    train_dataset = WaymoE2E(
-        indexFile="index_train.pkl", data_dir=args.data_dir, n_items=args.train_items
-    )
-    test_dataset = WaymoE2E(
-        indexFile="index_val.pkl", data_dir=args.data_dir, n_items=args.val_items
-    )
-    nw = 0
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        num_workers=nw,
-        collate_fn=collate_with_images,
-        persistent_workers=False,
-        pin_memory=False,
-    )
-    val_loader = torch.utils.data.DataLoader(
-        test_dataset,
-        batch_size=args.batch_size,
-        num_workers=nw,
-        collate_fn=collate_with_images,
-        persistent_workers=False,
-        pin_memory=False,
-    )
-
     # Model
     out_dim = 20 * 2  # Future: (B, 20, 2)
     feature_extractor = SAMFeatures(
@@ -125,6 +100,31 @@ if __name__ == "__main__":
     if args.compile:
         model = torch.compile(model, mode="max-autotune")
     lit_model = LitModel(model=model, lr=args.lr)
+
+    # Data
+    train_dataset = WaymoE2E(
+        indexFile="index_train.pkl", data_dir=args.data_dir, n_items=args.train_items
+    )
+    test_dataset = WaymoE2E(
+        indexFile="index_val.pkl", data_dir=args.data_dir, n_items=args.val_items
+    )
+    nw = 0
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        num_workers=nw,
+        collate_fn=collate_for_model(model),
+        persistent_workers=False,
+        pin_memory=False,
+    )
+    val_loader = torch.utils.data.DataLoader(
+        test_dataset,
+        batch_size=args.batch_size,
+        num_workers=nw,
+        collate_fn=collate_for_model(model),
+        persistent_workers=False,
+        pin_memory=False,
+    )
 
     # We don't want to save logs or checkpoints in the home directory - it'll fill up fast
     base_path = Path(args.data_dir).parent.as_posix()

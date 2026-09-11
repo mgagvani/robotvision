@@ -21,6 +21,7 @@ class ScorerConfig:
     pe_d_ffn: int = 4096
     n_heads: int = 8
     n_cameras: int = 3
+    cam_idxs_used: tuple = (1, 2, 3)  # F, FL, FR; the cameras collate_with_images must decode
 
 
 class DrivoRModel(nn.Module):
@@ -46,6 +47,7 @@ class DrivoRModel(nn.Module):
 
         # F, FL, FR, R, L, R, BL, BR respectively. choose the first n_cameras
         self.cameras = [1, 2, 3, 7, 4, 5, 6, 8][: self.cfg.n_cameras] 
+        assert tuple(self.cameras) == tuple(self.cfg.cam_idxs_used)
 
         if out_dim % 2 != 0:
             raise ValueError(f"out_dim must be even for (x,y) rollout, got {out_dim}")
