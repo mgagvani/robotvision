@@ -3,6 +3,31 @@ import torch
 import torch.nn as nn
 import timm
 
+
+class ResNetFeatures(nn.Module):
+    """ResNet backbone (resnet50) - widely available in timm, fallback when DINO/SAM unavailable."""
+
+    def __init__(self, model_name: str = "resnet50", frozen: bool = True, feature_stage: int = -1):
+        super().__init__()
+        self.backbone = timm.create_model(model_name, pretrained=True, features_only=True)
+        self.data_config = timm.data.resolve_data_config(model=self.backbone)
+        self.transforms = timm.data.create_transform(**self.data_config, is_training=False)
+        if frozen:
+            for p in self.backbone.parameters():
+                p.requires_grad = False
+            self.backbone.eval()
+        channels = self.backbone.feature_info.channels()
+        reductions = self.backbone.feature_info.reduction()
+        self.feature_stage = feature_stage
+        self.dims = [channels[feature_stage]]
+        self.patch_size = reductions[feature_stage]
+
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+        x_t = self.transforms(x.float().div(255.0))
+        feats = self.backbone(x_t)
+        return [feats[self.feature_stage]]
+
+
 class DINOFeatures(nn.Module):
     def __init__(self, model_name: str = "vit_small_plus_patch16_dinov3.lvd1689m", frozen: bool = True):
         super(DINOFeatures, self).__init__()

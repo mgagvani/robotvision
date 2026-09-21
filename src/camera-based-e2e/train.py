@@ -20,27 +20,27 @@ from torch.utils.data import BatchSampler
 
 # Replace with your model defined in models/
 from models.base_model import LitModel, collate_with_images
-from models.monocular import DeepMonocularModel
-from models.feature_extractors import SAMFeatures
+from models.proposal_planner import ProposalPlanner, IPadConfig
+from models.feature_extractors import SAMFeatures, DINOFeatures, ResNetFeatures
 
 
 class HomogeneousConcatBatchSampler(BatchSampler):
     """Emit batches from one ConcatDataset source at a time.
 
     Designed for ConcatDataset([waymo, nuscenes]) so every batch is
-    from one source. Works with DDP
+    from one source. Works with DDP.
     """
 
     def __init__(
         self,
-        dataset_lengths: tuple[int, int],
+        dataset_lengths: tuple,
         batch_size: int,
-        rank: int | None = None,
-        world_size: int | None = None,
+        rank: int = None,
+        world_size: int = None,
         drop_last: bool = False,
         shuffle: bool = True,
         seed: int = 42,
-        source_ratio: tuple[int, int] = (1, 1),
+        source_ratio: tuple = (1, 1),
         **kwargs,
     ):
         if len(dataset_lengths) != 2:
@@ -51,13 +51,10 @@ class HomogeneousConcatBatchSampler(BatchSampler):
             rank = int(os.environ.get("RANK", "0"))
         if world_size is None:
             world_size = int(os.environ.get("WORLD_SIZE", "1"))
-
         if world_size <= 0:
             raise ValueError(f"world_size must be > 0, got {world_size}")
         if rank < 0 or rank >= world_size:
-            raise ValueError(
-                f"Invalid rank/world_size pair: rank={rank}, world_size={world_size}"
-            )
+            raise ValueError(f"Invalid rank/world_size pair: rank={rank}, world_size={world_size}")
 
         self.lengths = dataset_lengths
         self.batch_size = batch_size
@@ -68,7 +65,6 @@ class HomogeneousConcatBatchSampler(BatchSampler):
         self.seed = seed
         self.epoch = 0
         self.source_ratio = source_ratio
-
         self.offset0 = 0
         self.offset1 = dataset_lengths[0]
 
@@ -82,13 +78,12 @@ class HomogeneousConcatBatchSampler(BatchSampler):
             return math.ceil((length - self.world_size) / self.world_size)
         return math.ceil(length / self.world_size)
 
-    def _make_rank_indices(self, start: int, length: int, rng: random.Random):
+    def _make_rank_indices(self, start, length, rng):
         idx = list(range(start, start + length))
         if self.shuffle:
             rng.shuffle(idx)
         num_samples = self._num_samples_per_rank(length)
         total_size = num_samples * self.world_size
-
         if self.drop_last:
             idx = idx[:total_size]
         elif total_size > len(idx):
@@ -97,17 +92,12 @@ class HomogeneousConcatBatchSampler(BatchSampler):
             padding_size = total_size - len(idx)
             repeats = math.ceil(padding_size / len(idx))
             idx += (idx * repeats)[:padding_size]
-
         return idx[self.rank : total_size : self.world_size]
 
-    def _chunk(self, indices: list[int]) -> list[list[int]]:
+    def _chunk(self, indices):
         if self.drop_last:
             n_full = len(indices) // self.batch_size
-            return [
-                indices[i * self.batch_size : (i + 1) * self.batch_size]
-                for i in range(n_full)
-            ]
-
+            return [indices[i * self.batch_size : (i + 1) * self.batch_size] for i in range(n_full)]
         out = []
         for i in range(0, len(indices), self.batch_size):
             out.append(indices[i : i + self.batch_size])
@@ -115,72 +105,72 @@ class HomogeneousConcatBatchSampler(BatchSampler):
 
     def __iter__(self):
         rng = random.Random(self.seed + self.epoch)
-
         idx0 = self._make_rank_indices(self.offset0, self.lengths[0], rng)
         idx1 = self._make_rank_indices(self.offset1, self.lengths[1], rng)
-
-        b0 = self._chunk(idx0)
-        b1 = self._chunk(idx1)
-
+        b0, b1 = self._chunk(idx0), self._chunk(idx1)
         w0 = max(0, int(self.source_ratio[0]))
         w1 = max(0, int(self.source_ratio[1]))
         if w0 == 0 and w1 == 0:
             w0, w1 = 1, 1
-
-        pattern = [0] * w0 + [1] * w1
-        if not pattern:
-            pattern = [0, 1]
-
+        pattern = [0] * w0 + [1] * w1 or [0, 1]
         i0, i1 = 0, 0
         for source in itertools.cycle(pattern):
             if i0 >= len(b0) and i1 >= len(b1):
                 break
             if source == 0:
                 if i0 < len(b0):
-                    yield b0[i0]
-                    i0 += 1
+                    yield b0[i0]; i0 += 1
             else:
                 if i1 < len(b1):
-                    yield b1[i1]
-                    i1 += 1
+                    yield b1[i1]; i1 += 1
 
     def __len__(self):
-        def n_batches(length: int):
+        def n_batches(length):
             per_rank = self._num_samples_per_rank(length)
-            if self.drop_last:
-                return per_rank // self.batch_size
-            return math.ceil(per_rank / self.batch_size)
-
+            return per_rank // self.batch_size if self.drop_last else math.ceil(per_rank / self.batch_size)
         return n_batches(self.lengths[0]) + n_batches(self.lengths[1])
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--data_dir", type=str, required=True, help="Path to data directory"
-    )
-    parser.add_argument(
-        "--batch_size", type=int, default=16, help="Batch size for training"
-    )
-    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
-    parser.add_argument(
-        "--max_epochs", type=int, default=10, help="Number of epochs to train"
-    )
-    parser.add_argument(
-        "--compile",
-        action="store_true",
-        help="Whether to compile the model with torch.compile",
-    )
-    parser.add_argument(
-        "--profile", action="store_true", help="Whether to run the profiler"
-    )
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default="waymo",
-        choices=["waymo", "nuscenes", "all"],
-        help="Which dataset to train on",
-    )
+    parser.add_argument('--data_dir', type=str, required=True, help='Path to data directory')
+    parser.add_argument('--dataset', type=str, default='waymo', choices=['waymo', 'nuscenes', 'all'],
+                        help='Which dataset to train on')
+    parser.add_argument('--model_type', type=str, default='deep_monocular', choices=['deep_monocular', 'proposal'],
+                        help='Model type: deep_monocular or proposal (proposal-centric planner)')
+    parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--max_epochs', type=int, default=10, help='Number of epochs to train')
+    parser.add_argument('--num_proposals', type=int, default=16, help='Number of proposals (proposal model only)')
+    parser.add_argument('--num_refinement_steps', type=int, default=4, help='Refinement iterations (weight-shared, iPad default=4)')
+    parser.add_argument('--smoothness_weight', type=float, default=0.01, help='Smoothness (jerk) loss weight (proposal model)')
+    parser.add_argument('--collision_weight', type=float, default=0.0, help='Collision penalty weight (proposal model)')
+    parser.add_argument('--comfort_weight', type=float, default=0.01, help='Comfort (curvature) loss weight (proposal model)')
+    parser.add_argument('--rfs_weight', type=float, default=0.0, help='RFS loss weight')
+    parser.add_argument('--diversity_weight', type=float, default=0.0, help='Diversity weight')
+    parser.add_argument('--prev_weight', type=float, default=0.1, help='Discount λ for intermediate proposal losses')
+    parser.add_argument('--score_weight', type=float, default=1.0, help='Score loss weight')
+    parser.add_argument('--score_warmup_epochs', type=int, default=2, help='Epochs before score loss activates')
+    parser.add_argument('--score_temperature', type=float, default=5.0, help='Temperature τ for quality target exp(-ADE/τ)')
+    parser.add_argument('--score_loss_type', type=str, default='bce',
+                        choices=['bce', 'ce', 'bce_pairwise', 'listnet'],
+                        help='Scorer objective: bce (iPad-faithful), ce, bce_pairwise, or listnet')
+    parser.add_argument('--score_target_type', type=str, default='l1',
+                        choices=['l1', 'navsim', 'rfs'],
+                        help='Quality target: l1, navsim, or rfs')
+    parser.add_argument('--no_rfs_target_comfort', action='store_true',
+                        help='For score_target_type=rfs: use pure RFS mean only (no jerk comfort multiplier)')
+    parser.add_argument('--score_rank_weight', type=float, default=0.2, help='Aux weight for pairwise ranking term')
+    parser.add_argument('--score_margin', type=float, default=0.2, help='Pairwise ranking margin')
+    parser.add_argument('--score_topk', type=int, default=0, help='Hard negative top-k for pairwise ranking (0=all)')
+    parser.add_argument('--comfort_jerk_threshold', type=float, default=5.0, help='Jerk threshold (m/s^3) for comfort metric')
+    parser.add_argument('--grad_clip', type=float, default=1.0, help='Gradient clipping max norm (0 to disable)')
+    parser.add_argument('--log_every_n_steps', type=int, default=100, help='How often (steps) to emit trainer logs')
+    parser.add_argument('--backbone', type=str, default='resnet', choices=['resnet', 'dino', 'sam'],
+                        help='Backbone: resnet (default), dino, or sam')
+    parser.add_argument('--no_wandb', action='store_true', help='Disable wandb logging (use CSV only)')
+    parser.add_argument('--compile', action='store_true', help='Whether to compile the model with torch.compile')
+    parser.add_argument('--profile', action='store_true', help='Whether to run the profiler')
     args = parser.parse_args()
 
     pl.seed_everything(42, workers=True)
@@ -295,41 +285,84 @@ if __name__ == "__main__":
         )
 
     # Model
-    in_dim = 16 * 6  # Past: (B, 16, 6)
     out_dim = 20 * 2  # Future: (B, 20, 2)
 
-    model = DeepMonocularModel(
-        feature_extractor=SAMFeatures(
-            model_name="timm/vit_pe_spatial_small_patch16_512.fb", frozen=True
-        ),
-        out_dim=out_dim,
-    )
+    if args.model_type == 'proposal':
+        backbone = (
+            ResNetFeatures(frozen=True) if args.backbone == 'resnet'
+            else DINOFeatures(frozen=True) if args.backbone == 'dino'
+            else SAMFeatures(frozen=True)
+        )
+        model = ProposalPlanner(
+            backbone=backbone,
+            d_model=256,
+            num_proposals=args.num_proposals,
+            num_refinement_steps=args.num_refinement_steps,
+            horizon=20,
+            num_cams=8,
+        )
+    else:
+        backbone = (
+            ResNetFeatures(frozen=True) if args.backbone == 'resnet'
+            else DINOFeatures(frozen=True) if args.backbone == 'dino'
+            else SAMFeatures(frozen=True)
+        )
+        model = DeepMonocularModel(feature_extractor=backbone, out_dim=out_dim, n_blocks=8)
     name = str(model.__class__.__name__.replace("Model", "")).lower()
+
     if args.compile:
         model = torch.compile(model, mode="max-autotune")
-    lit_model = LitModel(model=model, lr=args.lr)
+
+    if args.model_type == 'proposal':
+        ipad_config = IPadConfig(
+            rfs_weight=args.rfs_weight,
+            smoothness_weight=args.smoothness_weight,
+            collision_weight=args.collision_weight,
+            comfort_weight=args.comfort_weight,
+            diversity_weight=args.diversity_weight,
+            score_weight=args.score_weight,
+            score_warmup_epochs=args.score_warmup_epochs,
+            score_temperature=args.score_temperature,
+            score_loss_type=args.score_loss_type,
+            score_target_type=args.score_target_type,
+            score_rank_weight=args.score_rank_weight,
+            score_margin=args.score_margin,
+            score_topk=args.score_topk,
+            comfort_jerk_threshold=args.comfort_jerk_threshold,
+            prev_weight=args.prev_weight,
+            rfs_target_use_comfort=not args.no_rfs_target_comfort,
+        )
+    else:
+        ipad_config = None
+
+    lit_model = LitModel(
+        model=model,
+        lr=args.lr,
+        ipad_config=ipad_config,
+    )
 
     # We don't want to save logs or checkpoints in the home directory - it'll fill up fast
     base_path = Path(args.data_dir).parent.as_posix()
     timestamp = f"{name}_e2e_{args.dataset}_{datetime.now().strftime('%Y%m%d_%H%M')}"
-    wandb_logger = WandbLogger(
-        name=timestamp,
-        save_dir=base_path + "/logs",
-        project="robotvision",
-        log_model=True,
-    )
-    wandb_logger.watch(lit_model, log="all")
+    loggers = [CSVLogger(base_path + "/logs", name=timestamp)]
+    if not args.no_wandb:
+        wandb_logger = WandbLogger(name=timestamp, save_dir=base_path + "/logs", project="robotvision", log_model=True)
+        wandb_logger.watch(lit_model, log="all")
+        loggers.append(wandb_logger)
 
     strategy = "ddp" if torch.cuda.device_count() > 1 else "auto"
     use_distributed_sampler = args.dataset != "all"
     torch.set_float32_matmul_precision("medium")
+
     trainer = pl.Trainer(
         max_epochs=args.max_epochs,
-        logger=[CSVLogger(base_path + "/logs", name=timestamp), wandb_logger],
+        logger=loggers,
         strategy=strategy,
         use_distributed_sampler=use_distributed_sampler,
         precision="bf16-mixed" if torch.cuda.is_bf16_supported() else 16,
-        log_every_n_steps=10,
+        log_every_n_steps=args.log_every_n_steps,
+        gradient_clip_val=args.grad_clip if args.grad_clip > 0 else None,
+        gradient_clip_algorithm="norm",
         profiler=SimpleProfiler(extended=True) if args.profile else None,
         callbacks=[
             ModelCheckpoint(
@@ -360,6 +393,8 @@ if __name__ == "__main__":
         plt.legend()
         plt.tight_layout()
         out = Path("./visualizations")
+        out.mkdir(parents=True, exist_ok=True)
         plt.savefig(out / "loss.png", dpi=200)
     except Exception as e:
         print(f"Could not save loss plot: {e}")
+
