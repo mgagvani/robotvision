@@ -16,7 +16,7 @@ cd "$REPO_ROOT/src"
   --manifest "$VISUAL_GEN_ROOT/manifest.jsonl" \
   --data_dir "$DATA_DIR" \
   --run_root "$RUN_ROOT" \
-  --planner_checkpoint "$PLANNER_CHECKPOINT" \
+  --planner_checkpoint "$RUN_ROOT/camera-e2e-epoch=04-val_loss=2.90.ckpt" \
   --split val \
   --sae_block "${SAE_BLOCK:-3}" \
   --batch_size 8 --encode_batch_size 4096 \

@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 from pathlib import Path
 
 import matplotlib as mpl
@@ -30,11 +31,9 @@ import numpy as np
 
 SCRIPT_PATH = Path(__file__).resolve()
 E2E_ROOT = SCRIPT_PATH.parents[3]
+VISUAL_GEN_ROOT = Path(os.environ.get("VISUAL_GEN_ROOT", "."))  # set by paths.env
 
-DEFAULT_VISUAL_SUMMARY = Path(
-    "/work/hdd/bgxf/mgagvani/visual_gen_1000/sae_analysis/"
-    "sae_visual_gen_feature_summary_block_3.csv"
-)
+DEFAULT_VISUAL_SUMMARY = VISUAL_GEN_ROOT / "sae_analysis/sae_visual_gen_feature_summary_block_3.csv"
 DEFAULT_CONTROL_STAT_ROWS = SCRIPT_PATH.parent / "sae_control_stat_rows_block_3_val.csv"
 DEFAULT_OUTPUT_PREFIX = SCRIPT_PATH.parent / "fig5b_edit_to_steering_alignment"
 

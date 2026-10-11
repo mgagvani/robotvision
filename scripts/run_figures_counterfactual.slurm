@@ -20,7 +20,7 @@ SUMMARY_CSV=$VISUAL_GEN_ROOT/sae_analysis/sae_visual_gen_feature_summary_block_$
 TOKEN_PATH=$RUN_ROOT/tokens/planner_tokens_val.pt
 mkdir -p "$FIG_DIR"
 COMMON=(--manifest "$MANIFEST" --pair_csv "$PAIR_CSV" --data_dir "$DATA_DIR" --index_file index_val.pkl
-        --token_path "$TOKEN_PATH" --planner_checkpoint "$PLANNER_CHECKPOINT")
+        --token_path "$TOKEN_PATH" --planner_checkpoint "$RUN_ROOT/camera-e2e-epoch=04-val_loss=2.90.ckpt")
 
 # Fig. 3
 "$PYTHON_BIN" visualizations/paper/extract_counterfactual_trajectories.py "${COMMON[@]}" \
@@ -40,9 +40,8 @@ COMMON=(--manifest "$MANIFEST" --pair_csv "$PAIR_CSV" --data_dir "$DATA_DIR" --i
   --trajectory_cache "$FIG_DIR/counterfactual_gallery_expected_trajectories.json" --data_dir "$DATA_DIR" --index_file index_val.pkl \
   --output "$FIG_DIR/counterfactual_gallery_expected.png" --pdf_output "$FIG_DIR/counterfactual_gallery_expected.pdf"
 
-# Supplement: additional examples and failure cases
+# Supplement: additional examples
 "$PYTHON_BIN" visualizations/paper/plot_supp_edit_examples.py \
   --trajectory_cache "$FIG_DIR/counterfactual_gallery_expected_trajectories.json" \
-  --failures_trajectory_cache "$FIG_DIR/supp_edit_failures_trajectories.json" \
-  --summary_csv "$SUMMARY_CSV" --pairs_csv "$PAIR_CSV" --data_dir "$DATA_DIR" --index_file index_val.pkl \
-  --examples_output "$FIG_DIR/supp_edit_examples.png" --failures_output "$FIG_DIR/supp_edit_failures.png"
+  --summary_csv "$SUMMARY_CSV" --data_dir "$DATA_DIR" --index_file index_val.pkl \
+  --examples_output "$FIG_DIR/supp_edit_examples.png"

@@ -35,10 +35,8 @@ from pathlib import Path
 import os
 
 from loader import WaymoE2E
-from models.base_model import LitModel, collate_for_model
-from models.drivor import DrivoRModel
+from models.base_model import LitModel, collate_with_images
 from models.feature_extractors import SAMFeatures
-from models.gtrs import GTRSModel
 from models.monocular import DeepMonocularModel
 
 
@@ -55,11 +53,6 @@ if __name__ == "__main__":
         "--max_epochs", type=int, default=10, help="Number of epochs to train"
     )
     parser.add_argument(
-        "--compile",
-        action="store_true",
-        help="Whether to compile the model with torch.compile",
-    )
-    parser.add_argument(
         "--profile", action="store_true", help="Whether to run the profiler"
     )
     parser.add_argument(
@@ -74,13 +67,6 @@ if __name__ == "__main__":
         default=25_000,
         help="Number of validation samples to use.",
     )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="deepmonocular",
-        choices=["deepmonocular", "gtrs", "drivor"],
-        help="Model architecture to train",
-    )
     args = parser.parse_args()
 
     pl.seed_everything(42, workers=True)
@@ -90,15 +76,8 @@ if __name__ == "__main__":
     feature_extractor = SAMFeatures(
         model_name="timm/vit_pe_spatial_small_patch16_512.fb", frozen=True
     )
-    if args.model == "gtrs":
-        model = GTRSModel(feature_extractor=feature_extractor, out_dim=out_dim)
-    elif args.model == "drivor":
-        model = DrivoRModel(feature_extractor=feature_extractor, out_dim=out_dim)
-    else:
-        model = DeepMonocularModel(feature_extractor=feature_extractor, out_dim=out_dim)
-    name = args.model
-    if args.compile:
-        model = torch.compile(model, mode="max-autotune")
+    model = DeepMonocularModel(feature_extractor=feature_extractor, out_dim=out_dim)
+    name = "deepmonocular"
     lit_model = LitModel(model=model, lr=args.lr)
 
     # Data
@@ -113,7 +92,7 @@ if __name__ == "__main__":
         train_dataset,
         batch_size=args.batch_size,
         num_workers=nw,
-        collate_fn=collate_for_model(model),
+        collate_fn=collate_with_images,
         persistent_workers=False,
         pin_memory=False,
     )
@@ -121,7 +100,7 @@ if __name__ == "__main__":
         test_dataset,
         batch_size=args.batch_size,
         num_workers=nw,
-        collate_fn=collate_for_model(model),
+        collate_fn=collate_with_images,
         persistent_workers=False,
         pin_memory=False,
     )
@@ -136,15 +115,15 @@ if __name__ == "__main__":
         project="robotvision",
         log_model=True,
     )
-    if int(os.environ.get("RANK", "0")) == 0:
-        wandb_logger.watch(lit_model, log="all")
-
-    strategy = "ddp" if torch.cuda.device_count() > 1 else "auto"
+    # One srun task per GPU (scripts/run_train_waymo*.slurm); Lightning joins them into one DDP group.
+    gpus_per_node = int(os.environ.get("SLURM_NTASKS_PER_NODE", 1))
     torch.set_float32_matmul_precision("medium")
     trainer = pl.Trainer(
         max_epochs=args.max_epochs,
         logger=[CSVLogger(base_path + "/logs", name=timestamp), wandb_logger],
-        strategy=strategy,
+        devices=gpus_per_node,
+        num_nodes=int(os.environ.get("SLURM_NNODES", 1)),
+        strategy="ddp" if gpus_per_node > 1 else "auto",
         precision="bf16-mixed" if torch.cuda.is_bf16_supported() else 16,
         log_every_n_steps=10,
         profiler=SimpleProfiler(extended=True) if args.profile else None,
@@ -159,6 +138,8 @@ if __name__ == "__main__":
         ],
     )
 
+    if trainer.is_global_zero:
+        wandb_logger.watch(lit_model, log="all")
     trainer.fit(lit_model, train_loader, val_loader)
 
     # Export loss graph to visualizations/

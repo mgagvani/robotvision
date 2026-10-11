@@ -104,6 +104,7 @@ if __name__ == "__main__":
     if not torch.cuda.is_available():
         print("Must run on GPU")
 
+    import os
     import sys
     from pathlib import Path
     # Determine the absolute path to the directory containing loader.py
@@ -113,7 +114,7 @@ if __name__ == "__main__":
     sys.path.append(str(project_root))
 
     from loader import WaymoE2E
-    loader = WaymoE2E(indexFile="index_val.pkl", data_dir="/anvil/scratch/x-mgagvani/wod/waymo_end_to_end_camera_v1_0_0/waymo_open_dataset_end_to_end_camera_v_1_0_0/")
+    loader = WaymoE2E(indexFile="index_val.pkl", data_dir=os.environ["DATA_DIR"])
     data_iterator = iter(torch.utils.data.DataLoader(loader, batch_size=8, num_workers=4))
 
     device = torch.device("cuda")

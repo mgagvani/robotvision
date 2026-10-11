@@ -12,6 +12,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import pickle
 import random
 import sys
@@ -26,6 +27,8 @@ from matplotlib.lines import Line2D
 from PIL import Image
 
 
+VISUAL_GEN_ROOT = Path(os.environ.get("VISUAL_GEN_ROOT", "."))  # set by paths.env
+DATA_DIR = Path(os.environ.get("DATA_DIR", "."))  # set by paths.env
 SCRIPT_PATH = Path(__file__).resolve()
 E2E_ROOT = SCRIPT_PATH.parents[2]
 sys.path.insert(0, str(E2E_ROOT))
@@ -66,20 +69,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--manifest",
         type=Path,
-        default=Path("/work/hdd/bgxf/mgagvani/visual_gen_1000/manifest.jsonl"),
+        default=VISUAL_GEN_ROOT / "manifest.jsonl",
     )
     parser.add_argument(
         "--analysis_dir",
         type=Path,
-        default=Path("/work/hdd/bgxf/mgagvani/visual_gen_1000/sae_analysis"),
+        default=VISUAL_GEN_ROOT / "sae_analysis",
     )
     parser.add_argument(
         "--data_dir",
         type=Path,
-        default=Path(
-            "/work/nvme/bgxf/mgagvani/wod/waymo_end_to_end_camera_v1_0_0/"
-            "waymo_open_dataset_end_to_end_camera_v_1_0_0"
-        ),
+        default=DATA_DIR,
     )
     parser.add_argument("--index_file", type=Path, default=E2E_ROOT / "index_val.pkl")
     parser.add_argument("--sae_block", type=int, default=3)

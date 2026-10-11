@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""Supplement figures S4.3 (additional examples) and S4.4 (failure cases).
+"""Supplement figure S4.3 (additional examples).
 
-Both figures are built from real cached artifacts:
+The figure is built from real cached artifacts:
   - real planner trajectories (original/edited) from the expected-gallery cache,
   - real edited images from the visual-edit manifest,
   - real per-direction SAE feature deltas from the visual-gen summary CSV.
 
-Style follows visualizations/paper/FIGURE_STYLE_GUIDE.md and reuses the
-helpers from plot_counterfactual_figure.py.
+Reuses the style and drawing helpers from plot_counterfactual_figure.py.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import pickle
 import sys
 from pathlib import Path
@@ -23,6 +23,8 @@ from matplotlib.gridspec import GridSpec
 from matplotlib.lines import Line2D
 from PIL import Image
 
+VISUAL_GEN_ROOT = Path(os.environ.get("VISUAL_GEN_ROOT", "."))  # set by paths.env
+DATA_DIR = Path(os.environ.get("DATA_DIR", "."))  # set by paths.env
 SCRIPT_PATH = Path(__file__).resolve()
 PAPER_DIR = SCRIPT_PATH.parent
 E2E_ROOT = SCRIPT_PATH.parents[2]
@@ -60,25 +62,6 @@ DEFAULT_EXAMPLES = [
     ("add_pedestrian", 202, "add pedestrian"),
 ]
 
-DEFAULT_FAILURES = [
-    {
-        "direction": "add_stop_sign",
-        "dataset_idx": 391,
-        "label": "Unrealistic / non-minimal edit",
-    },
-    {
-        "direction": "add_pedestrian",
-        "dataset_idx": 496,
-        "label": "Irrelevant-object edit",
-    },
-    {
-        "direction": "add_stop_sign",
-        "dataset_idx": 236,
-        "label": "Visible edit, weak trajectory change",
-    },
-]
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -87,25 +70,14 @@ def parse_args() -> argparse.Namespace:
         default=PAPER_DIR / "counterfactual_gallery_expected_trajectories.json",
     )
     parser.add_argument(
-        "--failures_trajectory_cache",
-        type=Path,
-        default=PAPER_DIR / "supp_edit_failures_trajectories.json",
-    )
-    parser.add_argument(
         "--summary_csv",
         type=Path,
-        default=Path(
-            "/work/hdd/bgxf/mgagvani/visual_gen_1000/sae_analysis/"
-            "sae_visual_gen_feature_summary_block_3.csv"
-        ),
+        default=VISUAL_GEN_ROOT / "sae_analysis/sae_visual_gen_feature_summary_block_3.csv",
     )
     parser.add_argument(
         "--data_dir",
         type=Path,
-        default=Path(
-            "/work/nvme/bgxf/mgagvani/wod/waymo_end_to_end_camera_v1_0_0/"
-            "waymo_open_dataset_end_to_end_camera_v_1_0_0"
-        ),
+        default=DATA_DIR,
     )
     parser.add_argument("--index_file", type=Path, default=E2E_ROOT / "index_val.pkl")
     parser.add_argument("--top_k_features", type=int, default=5)
@@ -115,17 +87,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override successes as direction=dataset_idx (uses default labels).",
     )
-    parser.add_argument(
-        "--pairs_csv",
-        type=Path,
-        default=Path(
-            "/work/hdd/bgxf/mgagvani/visual_gen_1000/sae_analysis/"
-            "sae_visual_gen_pairs_block_3.csv"
-        ),
-        help="Per-example pairs CSV; maps dataset_idx -> token_blob_idx/edited_path for image-only failures.",
-    )
     parser.add_argument("--examples_output", type=Path, default=PAPER_DIR / "supp_edit_examples.png")
-    parser.add_argument("--failures_output", type=Path, default=PAPER_DIR / "supp_edit_failures.png")
     return parser.parse_args()
 
 
@@ -203,44 +165,6 @@ def resolve_overrides(items, defaults):
     return out
 
 
-def load_pairs_lookup(path: Path) -> dict[tuple[str, int], dict]:
-    if not path.exists():
-        return {}
-    out = {}
-    for row in read_csv_dicts(path):
-        try:
-            key = (str(row["edit_direction"]), int(float(row["dataset_idx"])))
-        except (KeyError, ValueError):
-            continue
-        out[key] = row
-    return out
-
-
-def build_failure_specs(plan, *, cache, indexes, data_dir):
-    specs = []
-    for item in plan:
-        direction = item["direction"]
-        dataset_idx = int(item["dataset_idx"])
-        row = cache.get((direction, dataset_idx))
-        if row is None:
-            print(f"WARNING: no cached trajectory for {direction}={dataset_idx}; skipping.")
-            continue
-        original = load_original_image(
-            indexes, data_dir, int(row["token_blob_idx"]), int(row.get("camera_idx", 1))
-        )
-        edited = Image.open(row["edited_path"]).convert("RGB")
-        specs.append(
-            {
-                "direction": direction,
-                "label": item["label"],
-                "original": original,
-                "edited": edited,
-                "row": row,
-            }
-        )
-    return specs
-
-
 def build_specs(plan, *, cache, indexes, data_dir, summary_rows, top_k):
     specs = []
     feat_vals = []
@@ -311,38 +235,6 @@ def make_examples_figure(specs, feat_xlim, output: Path) -> None:
     _save(fig, output)
 
 
-def make_failures_figure(specs, output: Path) -> None:
-    n = len(specs)
-    fig = plt.figure(figsize=(7.25, 1.62 * n + 0.3))
-    gs = GridSpec(nrows=n, ncols=3, figure=fig, width_ratios=[1.4, 1.4, 1.15],
-                  hspace=0.5, wspace=0.24)
-    fig.subplots_adjust(left=0.06, right=0.992, top=0.93, bottom=0.06)
-
-    for i, spec in enumerate(specs):
-        ax_o = fig.add_subplot(gs[i, 0])
-        draw_image_panel(ax_o, spec["original"])
-        if i == 0:
-            ax_o.set_title("Original image", fontweight="bold", pad=5, fontsize=8.0)
-        ax_o.set_ylabel(
-            f"{chr(97 + i)}.  {spec['label']}",
-            rotation=90, labelpad=8, fontsize=6.8, color=MUTED, va="center",
-        )
-
-        ax_e = fig.add_subplot(gs[i, 1])
-        draw_image_panel(ax_e, spec["edited"])
-        if i == 0:
-            ax_e.set_title("Edited image", fontweight="bold", pad=5, fontsize=8.0)
-
-        ax_third = fig.add_subplot(gs[i, 2])
-        if i == 0:
-            ax_third.set_title("Predicted\ntrajectories", fontweight="bold", pad=5, fontsize=7.4)
-        draw_trajectory_panel(
-            ax_third, spec["row"], show_gt=True, show_legend=(i == 0),
-        )
-
-    _save(fig, output)
-
-
 def _save(fig, output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     pdf = output.with_suffix(".pdf")
@@ -372,17 +264,11 @@ def main() -> None:
         example_plan, cache=cache, indexes=indexes, data_dir=args.data_dir,
         summary_rows=summary_rows, top_k=args.top_k_features,
     )
-    failures_cache = load_cache(args.failures_trajectory_cache)
-    fail_specs = build_failure_specs(
-        DEFAULT_FAILURES, cache=failures_cache, indexes=indexes, data_dir=args.data_dir,
-    )
 
     feat_xlim = (math.ceil(max(ex_feat) * 5) / 5 + 0.12) if ex_feat else 1.0
 
     if ex_specs:
         make_examples_figure(ex_specs, feat_xlim, args.examples_output)
-    if fail_specs:
-        make_failures_figure(fail_specs, args.failures_output)
 
 
 if __name__ == "__main__":

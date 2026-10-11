@@ -2,9 +2,9 @@
 
     python build_index.py /path/to/waymo_open_dataset_end_to_end_camera_v_1_0_0
 
-Writes index_{train,val,test}.pkl next to this file: lists of
+Writes index_{train,val}.pkl next to this file: lists of
 (tfrecord filename, byte offset of the E2EDFrame proto, proto length).
-Takes roughly 10 minutes. The repository already ships the three index files
+Takes roughly 10 minutes. The repository already ships both index files
 for WOD-E2E v1.0.0, so this only needs to run for a fresh dataset version.
 """
 import os
@@ -17,7 +17,7 @@ from tqdm import tqdm
 DATA_DIR = sys.argv[1]
 OUT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-for category in ["train", "val", "test"]:
+for category in ["train", "val"]:
     indexes = []
     files = sorted(f for f in os.listdir(DATA_DIR) if ".tfrecord" in f and f.startswith(category))
     for fn in tqdm(files, desc=category):

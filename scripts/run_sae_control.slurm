@@ -15,7 +15,7 @@ SAE_BLOCK=${SAE_BLOCK:-3}
 OUT=${OUTPUT_DIR:-$RUN_ROOT/analysis/block_$SAE_BLOCK}
 "$PYTHON_BIN" analyze_sae_control.py \
   --run_root "$RUN_ROOT" \
-  --planner_checkpoint "$PLANNER_CHECKPOINT" \
+  --planner_checkpoint "$RUN_ROOT/camera-e2e-epoch=04-val_loss=2.90.ckpt" \
   --split val \
   --sae_block "$SAE_BLOCK" \
   --data_dir "$DATA_DIR" \

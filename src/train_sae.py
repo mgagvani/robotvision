@@ -122,12 +122,10 @@ def train_one_block(
     model = SparseAutoencoder(
         input_dim=train_tensor.shape[1],
         latent_dim=train_tensor.shape[1],
-        sae_type=TOPK_AUX_SAE_TYPE,
         k=k,
         k_aux=k_aux,
         aux_alpha=lambda_aux,
         dead_steps_threshold=dead_steps_threshold,
-        use_encoder_bias=False,
     ).to(device)
     model.set_preprocessing_state(b_pre=b_pre, cmse=cmse)
 

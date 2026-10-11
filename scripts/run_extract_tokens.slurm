@@ -15,7 +15,7 @@ SPLITS=(train val)
 SPLIT=${SPLITS[$SLURM_ARRAY_TASK_ID]}
 mkdir -p "$RUN_ROOT/tokens"
 "$PYTHON_BIN" extract_planner_tok.py \
-  --checkpoint "$PLANNER_CHECKPOINT" \
+  --checkpoint "$RUN_ROOT/camera-e2e-epoch=04-val_loss=2.90.ckpt" \
   --data_dir "$DATA_DIR" \
   --index_file "index_${SPLIT}.pkl" \
   --output_path "$RUN_ROOT/tokens/planner_tokens_${SPLIT}.pt" \

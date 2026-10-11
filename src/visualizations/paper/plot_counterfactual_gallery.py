@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import pickle
 import sys
 from pathlib import Path
@@ -17,6 +18,7 @@ import torch
 import torchvision
 
 
+DATA_DIR = Path(os.environ.get("DATA_DIR", "."))  # set by paths.env
 SCRIPT_PATH = Path(__file__).resolve()
 E2E_ROOT = SCRIPT_PATH.parents[2]
 sys.path.insert(0, str(E2E_ROOT))
@@ -46,10 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data_dir",
         type=Path,
-        default=Path(
-            "/work/nvme/bgxf/mgagvani/wod/waymo_end_to_end_camera_v1_0_0/"
-            "waymo_open_dataset_end_to_end_camera_v_1_0_0"
-        ),
+        default=DATA_DIR,
     )
     parser.add_argument("--index_file", type=Path, default=E2E_ROOT / "index_val.pkl")
     parser.add_argument(

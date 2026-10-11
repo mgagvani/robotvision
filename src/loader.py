@@ -73,7 +73,7 @@ class WaymoE2E(Dataset):
         past = np.array(past, dtype=np.float32) # ensure consistent dtype
         future = np.array(future, dtype=np.float32)
 
-        # For submission to waymo evaluation server
+        # Frame (segment) name
         name = frame.frame.context.name
 
         # Return JPEG images as torch uint8 tensors so DataLoader can use shared memory.
@@ -100,8 +100,7 @@ if __name__ == "__main__":
     from torch.utils.data import DataLoader
     import time
     from tqdm import tqdm
-    # NOTE: Replace with your path
-    DATA_DIR = '/anvil/scratch/x-mgagvani/wod/waymo_end_to_end_camera_v1_0_0/waymo_open_dataset_end_to_end_camera_v_1_0_0'
+    DATA_DIR = os.environ["DATA_DIR"]  # set by paths.env
     BATCH_SIZE = 256
     dataset = WaymoE2E(indexFile="index_train.pkl", data_dir = DATA_DIR)
     loader = DataLoader(

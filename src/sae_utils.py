@@ -5,9 +5,6 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from models.base_model import LitModel
-from models.feature_extractors import SAMFeatures
-from models.monocular import DeepMonocularModel
 from models.sae import SparseAutoencoder
 
 if TYPE_CHECKING:
@@ -22,40 +19,6 @@ DRVLA_SOURCE_URLS = (
     "https://drvla.github.io/",
     "https://drvla.github.io/drvla.pdf",
 )
-
-
-class ActivationCapture:
-    def __init__(self) -> None:
-        self.activations: torch.Tensor | None = None
-        self._handle = None
-
-    def clear(self) -> None:
-        self.activations = None
-
-    def register(self, module) -> "ActivationCapture":
-        """Attach to `module` and retain the handle so the hook can be removed."""
-        self.remove()
-        self._handle = module.register_forward_hook(self)
-        return self
-
-    def remove(self) -> None:
-        if self._handle is not None:
-            self._handle.remove()
-            self._handle = None
-
-    def __call__(self, module, inputs, output) -> None:
-        del module, inputs
-        self.activations = output.detach()
-
-
-def freeze_module(module) -> None:
-    for param in module.parameters():
-        param.requires_grad = False
-
-
-def set_eval_mode(*modules) -> None:
-    for module in modules:
-        module.eval()
 
 
 def planner_token_key(block_idx: int) -> str:
@@ -147,92 +110,6 @@ def build_sae_from_checkpoint(ckpt: dict) -> SparseAutoencoder:
     )
     model.load_state_dict(normalize_compiled_state_dict(ckpt["state_dict"], model), strict=False)
     return model
-
-
-def build_default_backbone() -> DeepMonocularModel:
-    return DeepMonocularModel(
-        feature_extractor=SAMFeatures(
-            model_name="timm/vit_pe_spatial_small_patch16_512.fb",
-            frozen=True,
-        ),
-        out_dim=40,
-    )
-
-
-def build_default_lit_model(model_checkpoint_path: str) -> LitModel:
-    model = LitModel.load_from_checkpoint(
-        model_checkpoint_path,
-        model=build_default_backbone(),
-        map_location="cpu",
-    )
-    model.eval()
-    return model
-
-
-def resolve_sae_checkpoint_path(path: str | Path, sae_block: int) -> Path:
-    checkpoint_path = Path(path).expanduser()
-    if checkpoint_path.is_dir():
-        # Two layouts exist in the wild and both must resolve:
-        #   * a flat directory of per-block files, `sae_block_{n}.pt`
-        #   * a train_sae.py run root or model dir, which infer_sae_paths()
-        #     addresses as `model/block_{n}/sae_checkpoint.pt`
-        # Only accepting the first silently rejected valid run roots.
-        candidates = (
-            checkpoint_path / f"sae_block_{sae_block}.pt",
-            checkpoint_path / "sae_checkpoint.pt",
-            checkpoint_path / f"block_{sae_block}" / "sae_checkpoint.pt",
-            infer_sae_model_dir(checkpoint_path, sae_block) / "sae_checkpoint.pt",
-        )
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
-        tried = "\n  ".join(str(c) for c in candidates)
-        raise FileNotFoundError(
-            f"No SAE checkpoint for block {sae_block} under {checkpoint_path}. Tried:\n  {tried}"
-        )
-    if checkpoint_path.suffix == ".pt":
-        return checkpoint_path
-    raise ValueError(
-        f"Unsupported SAE checkpoint artifact '{checkpoint_path}'. Expected a .pt file or a directory."
-    )
-
-
-def get_sae_target_layer(model: LitModel, block_idx: int):
-    return model.model.blocks[block_idx]
-
-
-def load_model_and_sae(
-    model_checkpoint_path: str,
-    sae_checkpoint_path: str | Path,
-    block_idx: int,
-    *,
-    device: torch.device | None = None,
-) -> tuple[LitModel, SparseAutoencoder, ActivationCapture, Path]:
-    model = build_default_lit_model(model_checkpoint_path)
-    resolved_sae_checkpoint_path = resolve_sae_checkpoint_path(sae_checkpoint_path, block_idx)
-    sae_checkpoint = torch.load(resolved_sae_checkpoint_path, map_location="cpu")
-    checkpoint_block_idx = sae_checkpoint.get("block_index")
-    if checkpoint_block_idx is not None and int(checkpoint_block_idx) != block_idx:
-        raise ValueError(
-            f"SAE checkpoint {resolved_sae_checkpoint_path} was trained for block "
-            f"{checkpoint_block_idx}, not requested block {block_idx}."
-        )
-    sae = build_sae_from_checkpoint(sae_checkpoint)
-    sae.eval()
-
-    capture = ActivationCapture().register(get_sae_target_layer(model, block_idx))
-
-    if device is not None:
-        model = model.to(device)
-        sae = sae.to(device)
-
-    return model, sae, capture, resolved_sae_checkpoint_path
-
-
-def compute_hidden_activations(sae: SparseAutoencoder, hooked_acts: torch.Tensor) -> torch.Tensor:
-    flat_acts = hooked_acts.reshape(-1, hooked_acts.size(-1))
-    hidden = sae.encode(flat_acts)
-    return hidden.reshape(hooked_acts.size(0), -1)
 
 
 def load_sae_bundle(

@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 import torchvision
-import functools
 from dataclasses import asdict, is_dataclass
 
 from .losses.depth_loss import DepthLoss
@@ -449,32 +448,24 @@ class LitModel(pl.LightningModule):
     def validation_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, "val")
     
-def collate_for_model(model):
-    """collate_with_images bound to the cameras `model` reads (front only unless its cfg says otherwise)."""
-    return functools.partial(collate_with_images, cam_idxs=tuple(getattr(model.cfg, "cam_idxs_used", (1,))))
+FRONT_CAMERA = 1
 
 
-def collate_with_images(batch, cam_idxs=(1,)):
-    """Collate that CPU-decodes requested cameras in the dataloader worker."""
+def collate_with_images(batch):
+    """Collate that CPU-decodes the front camera (the only one SMTS reads) in the dataloader worker."""
     past = [torch.as_tensor(b["PAST"], dtype=torch.float32) for b in batch]
     future = [torch.as_tensor(b["FUTURE"], dtype=torch.float32) for b in batch]
     intent = torch.as_tensor([b["INTENT"] for b in batch])
     names = [b["NAME"] for b in batch]
 
-    num_cams = len(batch[0]["IMAGES_JPEG"])
-    images = [None] * num_cams
-    for cam_idx in cam_idxs:
-        jpegs = [
-            b["IMAGES_JPEG"][cam_idx] if isinstance(b["IMAGES_JPEG"][cam_idx], torch.Tensor)
-            else torch.frombuffer(bytearray(b["IMAGES_JPEG"][cam_idx]), dtype=torch.uint8)
-            for b in batch
-        ]
-        decoded = torchvision.io.decode_jpeg(
-            jpegs,
-            mode=torchvision.io.ImageReadMode.UNCHANGED,
-            device="cpu",
-        )
-        images[cam_idx] = torch.stack(decoded, dim=0)
+    jpegs = [
+        b["IMAGES_JPEG"][FRONT_CAMERA] if isinstance(b["IMAGES_JPEG"][FRONT_CAMERA], torch.Tensor)
+        else torch.frombuffer(bytearray(b["IMAGES_JPEG"][FRONT_CAMERA]), dtype=torch.uint8)
+        for b in batch
+    ]
+    decoded = torchvision.io.decode_jpeg(jpegs, mode=torchvision.io.ImageReadMode.UNCHANGED, device="cpu")
+    images = [None] * len(batch[0]["IMAGES_JPEG"])
+    images[FRONT_CAMERA] = torch.stack(decoded, dim=0)
 
     return {
         "PAST": torch.stack(past, dim=0),

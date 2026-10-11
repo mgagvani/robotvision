@@ -38,5 +38,4 @@ curl -fsS "$BASE_URL/models" >/dev/null || { echo "vLLM not ready"; exit 1; }
   --output_dir "$OUTPUT_DIR" \
   --max_items "$NUM_ITEMS" \
   --yolo_model "${YOLO_MODEL:-yolo26x.pt}" \
-  --generator local \
   --editor firered
