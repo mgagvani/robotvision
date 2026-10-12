@@ -1,20 +1,15 @@
 # Mechanistic Interpretability for End-to-End Self-Driving
 
-Code for the SMTS planner (Simple Monocular Trajectory Scorer), the per-block TopK sparse
-autoencoders trained on its planner-query tokens, and every analysis in the paper:
-feature clustering, counterfactual visual edits, and latent steering.
-Everything runs on the Waymo Open Dataset End-to-End Driving (WOD-E2E) v1.0.0 camera release.
-
 ## Layout
 
 ```
-src/                    all Python; run every command from this directory (or via scripts/)
+src/                    
   loader.py             WOD-E2E reader (seeks into the TFRecords through index_{split}.pkl)
   models/               SMTS (monocular.py), LitModel trainer, SAE
   train.py              planner training            train_sae.py            SAE training
   extract_planner_tok.py  planner-query tokens      analyze_sae_*.py        SAE analyses
   index_{train,val}.pkl   TFRecord index (rebuild with build_index.py for a new dataset version)
-sae_checkpoints/        the paper's block-0..3 SAEs (sae_block_{n}.pt)
+sae_checkpoints/        the paper's SAEs (sae_block_{n}.pt)
 scripts/                one Slurm job per pipeline stage; all read paths.env
 paths.env               every machine-specific path; the only file to edit
 ```
@@ -22,20 +17,19 @@ paths.env               every machine-specific path; the only file to edit
 ## Setup
 
 ```bash
-uv venv && uv pip install -e .                 # python >= 3.12, CUDA torch
-uv pip install -e '.[visual-edits]'            # only for counterfactual-edit generation (stage 1)
-cp paths.env paths.env.local 2>/dev/null; $EDITOR paths.env   # data, checkpoint, output, HF-cache locations
-source paths.env                               # exports SBATCH_ACCOUNT / SBATCH_PARTITION too
+uv venv && uv pip install -e . 
+uv pip install -e '.[visual-edits]' 
+cp paths.env paths.env.local 2>/dev/null; $EDITOR paths.env  
+source paths.env 
 ```
 
-Data: download WOD-E2E v1.0.0 (`waymo_open_dataset_end_to_end_camera_v_1_0_0`) and point
-`DATA_DIR` at the TFRecord directory. The shipped `src/index_*.pkl` files index that exact
-release; `python build_index.py $DATA_DIR` regenerates them.
+Data: you will need to download WOD-E2E v1.0.0 (`waymo_open_dataset_end_to_end_camera_v_1_0_0`) and point
+`DATA_DIR` at the TFRecord directory. The `src/index_*.pkl` files in the repo are indexes for this data to improve access speed. Running `python build_index.py $DATA_DIR` will regenerate them.
 
 Checkpoints: the paper's SMTS checkpoint is `$RUN_ROOT/camera-e2e-epoch=04-val_loss=2.90.ckpt`
 (placed there by `python artifacts.py download`); the SAEs are in `sae_checkpoints/`. `RUN_ROOT` is the
 SAE run root: `tokens/planner_tokens_{train,val}.pt` from step 2 and `model/block_{n}/sae_checkpoint.pt`
-from step 3 (copy the shipped SAEs there to skip step 3).
+from step 3.
 
 Every SAE analysis reads `$RUN_ROOT/tokens/planner_tokens_val.pt`, so that file must have been
 extracted from the same planner checkpoint the SAEs were trained on (step 2 with the paper
@@ -45,8 +39,7 @@ features, matching the paper's 258; with a stale cache it keeps 192.
 
 ## Reproducing the paper
 
-Submit from the repository root after `source paths.env`. Every script accepts overrides through
-environment variables (see the header of each file).
+Note that every script accepts overrides through environment variables (see the top of each file).
 
 | # | Paper result | Command | Output |
 |---|---|---|---|
