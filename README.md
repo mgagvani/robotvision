@@ -37,7 +37,7 @@ checkpoint). A token cache from any other checkpoint silently changes every
 downstream number: with the paper checkpoint the block-3 activation filter keeps 257 of 384
 features, matching the paper's 258; with a stale cache it keeps 192.
 
-## Reproducing the paper
+## Usage
 
 Note that every script accepts overrides through environment variables (see the top of each file).
 
