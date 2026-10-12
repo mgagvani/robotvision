@@ -35,20 +35,6 @@ def parse_float_list(text: str) -> list[float]:
     return [float(part.strip()) for part in text.split(",") if part.strip()]
 
 
-def infer_checkpoint_path(run_root: Path, token_blob: dict) -> str:
-    meta_path = token_blob.get("meta", {}).get("checkpoint")
-    if meta_path and Path(meta_path).exists():
-        return meta_path
-
-    repo_default = Path(__file__).resolve().parent / "camera-e2e-epoch=04-val_loss=2.90.ckpt"
-    if repo_default.exists():
-        return str(repo_default)
-
-    raise FileNotFoundError(
-        "Could not infer planner checkpoint path. Pass --planner_checkpoint explicitly."
-    )
-
-
 def reshape_trajectory(trajectory: torch.Tensor, num_proposals: int, horizon: int) -> torch.Tensor:
     if trajectory.ndim == 4:
         return trajectory
@@ -155,48 +141,6 @@ def intervention_levels_for_feature(
     return [(base_activation + alpha * scale).clamp_min(0.0) for alpha in alphas]
 
 
-def run_intervention_outputs(
-    *,
-    sae_block: int,
-    sae: SparseAutoencoder,
-    planner_model,
-    lit_model,
-    token_tensor_cpu: torch.Tensor,
-    past_cpu: torch.Tensor,
-    relevant_indices: torch.Tensor,
-    level_values: list[torch.Tensor],
-    base_z_cpu: torch.Tensor,
-    dataset,
-    device: torch.device,
-) -> list[dict[str, torch.Tensor]]:
-    base_x = token_tensor_cpu[relevant_indices].to(device)
-    base_z = base_z_cpu[relevant_indices].to(device)
-
-    replay_context = None
-    if sae_block == DEFAULT_SAE_BLOCK:
-        past = past_cpu[relevant_indices].to(device)
-    else:
-        batch = collate_dataset_indices(dataset, relevant_indices)
-        replay_context = prepare_replay_context(planner_model, lit_model, batch, device=device)
-        past = replay_context["past"]
-
-    outputs = []
-    sae.eval()
-    planner_model.eval()
-    with torch.no_grad():
-        for level in level_values:
-            z_mod = base_z.clone()
-            feature_idx = None
-            # Caller overwrites a single feature before passing level values,
-            # so reuse the matching level tensor positionally below.
-            if level.ndim != 1:
-                raise ValueError("Expected per-scene latent level vector.")
-            # Identify the edited feature by comparing shapes later in caller.
-            # z_mod is updated in caller before use.
-            outputs.append((z_mod, past, base_x, replay_context))
-    return outputs
-
-
 def analyze_feature(
     feature_idx: int,
     token_tensor_cpu: torch.Tensor,
@@ -207,7 +151,6 @@ def analyze_feature(
     alphas: list[float],
     sae: SparseAutoencoder,
     planner_model,
-    lit_model,
     sae_block: int,
     past_cpu: torch.Tensor,
     global_stat_stds: dict[str, float],
@@ -258,7 +201,7 @@ def analyze_feature(
         past = past_cpu[relevant_indices].to(device)
     else:
         batch = collate_dataset_indices(dataset, relevant_indices)
-        replay_context = prepare_replay_context(planner_model, lit_model, batch, device=device)
+        replay_context = prepare_replay_context(planner_model, batch, device=device)
         past = replay_context["past"]
 
     stat_curves = {name: [] for name in STAT_NAMES}
@@ -434,8 +377,8 @@ if __name__ == "__main__":
     token_blob = bundle["token_blob"]
     token_tensor, token_key = resolve_token_tensor(token_blob, args.sae_block)
 
-    planner_checkpoint = args.planner_checkpoint or infer_checkpoint_path(run_root, token_blob)
-    planner_model, lit_model = load_model(planner_checkpoint, device=device)
+    planner_checkpoint = args.planner_checkpoint or token_blob["meta"]["checkpoint"]
+    planner_model = load_model(planner_checkpoint, device=device)
 
     global_stat_stds = compute_global_stat_stds(
         token_blob=token_blob,
@@ -499,7 +442,6 @@ if __name__ == "__main__":
             alphas=alphas,
             sae=sae,
             planner_model=planner_model,
-            lit_model=lit_model,
             sae_block=args.sae_block,
             past_cpu=past_cpu,
             global_stat_stds=global_stat_stds,

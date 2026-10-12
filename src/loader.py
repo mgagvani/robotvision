@@ -7,8 +7,6 @@ import numpy as np
 from typing import Optional
 import random
 
-devices = ['cuda:0', 'cuda:1']
-
 random.seed(42) # Deterministic
 
 class WaymoE2E(Dataset): 
@@ -83,42 +81,3 @@ class WaymoE2E(Dataset):
         ]
 
         return {'PAST': past, 'FUTURE': future, 'IMAGES_JPEG': jpeg_tensors, 'INTENT': frame.intent, 'NAME': name}
-
-
-def collate_with_images(batch):
-    """Collate that keeps IMAGES_JPEG as a list-of-lists (variable-size JPEG
-    bytes cannot be stacked) and delegates everything else to default_collate."""
-    from torch.utils.data.dataloader import default_collate
-    images = [sample.pop('IMAGES_JPEG') for sample in batch]
-    collated = default_collate(batch)
-    collated['IMAGES_JPEG'] = images  # list[list[Tensor]], one inner list per sample
-    return collated
-
-
-if __name__ == "__main__":
-
-    from torch.utils.data import DataLoader
-    import time
-    from tqdm import tqdm
-    DATA_DIR = os.environ["DATA_DIR"]  # set by paths.env
-    BATCH_SIZE = 256
-    dataset = WaymoE2E(indexFile="index_train.pkl", data_dir = DATA_DIR)
-    loader = DataLoader(
-        dataset, 
-        batch_size=BATCH_SIZE,
-        num_workers=0,
-        collate_fn=collate_with_images,
-        pin_memory=True, # causes error
-    )
-    # next(iter(loader))
-    
-    def main():
-        # start = time.time()
-        for batch_of_frames in tqdm(loader):
-            # print(batch_of_frames["INTENT"])
-            # print(batch_of_frames.keys(), [b.shape for b in batch_of_frames.values() if isinstance(b, torch.Tensor)])
-            pass
-        # print("Total Time:", time.time()-start)
-    
-    import cProfile
-    main()

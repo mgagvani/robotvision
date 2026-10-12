@@ -7,8 +7,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-TOPK_AUX_SAE_TYPE = "topk_aux"
-
 
 class SparseAutoencoder(nn.Module):
     def __init__(
@@ -24,7 +22,6 @@ class SparseAutoencoder(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.latent_dim = latent_dim
-        self.sae_type = TOPK_AUX_SAE_TYPE
         self.k = min(k if k is not None else latent_dim, latent_dim)
         self.k_aux = k_aux
         self.aux_alpha = aux_alpha

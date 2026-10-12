@@ -7,16 +7,10 @@ from loader import WaymoE2E
 from models.base_model import LitModel, collate_with_images
 from models.feature_extractors import SAMFeatures
 from models.monocular import DeepMonocularModel
-from sae_utils import (
-    DRVLA_SAE_VERSION,
-    DRVLA_SOURCE_NOTE,
-    DRVLA_SOURCE_URLS,
-    planner_inputs_from_collated_batch,
-    planner_token_key,
-)
+from sae_utils import planner_inputs_from_collated_batch, planner_token_key
 
 
-def load_model(checkpoint_path: str, device: torch.device) -> tuple[DeepMonocularModel, LitModel]:
+def load_model(checkpoint_path: str, device: torch.device) -> DeepMonocularModel:
     out_dim = 20 * 2
     model = DeepMonocularModel(
         feature_extractor=SAMFeatures(
@@ -35,7 +29,7 @@ def load_model(checkpoint_path: str, device: torch.device) -> tuple[DeepMonocula
     model.eval()
     for param in model.parameters():
         param.requires_grad = False
-    return model, lit_model
+    return model
 
 
 if __name__ == "__main__":
@@ -66,7 +60,7 @@ if __name__ == "__main__":
         pin_memory=False,
     )
 
-    model, lit_model = load_model(args.checkpoint, device)
+    model = load_model(args.checkpoint, device)
 
     planner_tok = []
     past = []
@@ -85,9 +79,7 @@ if __name__ == "__main__":
             intent.append(batch["INTENT"])
             names.extend(batch["NAME"])
 
-            model_inputs = planner_inputs_from_collated_batch(
-                batch, lit_model=lit_model, device=device
-            )
+            model_inputs = planner_inputs_from_collated_batch(batch, device=device)
             out = model(model_inputs, return_block_tokens=True)
             planner_tok.append(out["planner_query_tok"].cpu())
             traj.append(out["trajectory"].cpu())
@@ -114,13 +106,6 @@ if __name__ == "__main__":
             "num_samples": len(names),
             "n_items": args.n_items,
             "n_blocks": model.cfg.n_blocks,
-            "sae_version": DRVLA_SAE_VERSION,
-            "source_note": DRVLA_SOURCE_NOTE,
-            "source_urls": list(DRVLA_SOURCE_URLS),
-            "activation_kind": "post_transformer_block_query",
-            "planner_query_token_keys": [
-                planner_token_key(block_idx) for block_idx in range(model.cfg.n_blocks)
-            ],
         },
         "trajectory": torch.cat(traj, dim=0),
         "scores": torch.cat(score, dim=0),

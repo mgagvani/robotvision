@@ -48,119 +48,114 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 def compute_trajectory_stats(token_blob: dict) -> dict[str, torch.Tensor]:
     stats = {}
 
-    if "future" in token_blob:
-        future = token_blob["future"].float()
-        displacement = future[:, -1] - future[:, 0]
-        stats["future_final_x"] = future[:, -1, 0]
-        stats["future_final_y"] = future[:, -1, 1]
-        stats["future_total_displacement"] = torch.norm(displacement, dim=-1)
+    future = token_blob["future"].float()
+    displacement = future[:, -1] - future[:, 0]
+    stats["future_final_x"] = future[:, -1, 0]
+    stats["future_final_y"] = future[:, -1, 1]
+    stats["future_total_displacement"] = torch.norm(displacement, dim=-1)
 
-        if future.shape[1] >= 3:
-            seg = future[:, 1:] - future[:, :-1]
-            seg_norm = torch.norm(seg, dim=-1).clamp_min(1e-6)
-            heading = torch.atan2(seg[..., 1], seg[..., 0])
-            d_heading = torch.atan2(
-                torch.sin(heading[:, 1:] - heading[:, :-1]),
-                torch.cos(heading[:, 1:] - heading[:, :-1]),
-            ).abs()
-            ds = 0.5 * (seg_norm[:, 1:] + seg_norm[:, :-1])
-            curvature = d_heading / ds.clamp_min(1e-6)
-            stats["future_avg_curvature"] = curvature.mean(dim=1)
-
-    if "scores" in token_blob:
-        scores = token_blob["scores"].float()
-        selected_idx = scores.argmin(dim=1)
-        stats["selected_proposal"] = selected_idx.float()
-
-        if scores.shape[1] > 1:
-            sorted_scores = scores.sort(dim=1).values
-            stats["score_margin"] = sorted_scores[:, 1] - sorted_scores[:, 0]
-
-        probs = torch.softmax(-scores, dim=1)
-        stats["score_entropy"] = -(probs * probs.clamp_min(1e-8).log()).sum(dim=1)
-
-    if "trajectory" in token_blob and "scores" in token_blob and "future" in token_blob:
-        future = token_blob["future"].float()
-        trajectory = token_blob["trajectory"].float()
-        scores = token_blob["scores"].float()
-
-        n = future.shape[0]
-        horizon = future.shape[1]
-        num_proposals = scores.shape[1]
-
-        traj = trajectory.view(n, num_proposals, horizon, 2)
-        dist = torch.norm(traj - future[:, None], dim=-1)
-        ade_per_mode = dist.mean(dim=-1)
-
-        selected_idx = scores.argmin(dim=1)
-        row_idx = torch.arange(n)
-
-        selected_ade = ade_per_mode[row_idx, selected_idx]
-        oracle_ade = ade_per_mode.min(dim=1).values
-        regret = selected_ade - oracle_ade
-
-        traj_mean = traj.mean(dim=1, keepdim=True)
-        proposal_spread = torch.norm(traj - traj_mean, dim=-1).mean(dim=(1, 2))
-
-        stats["selected_ade"] = selected_ade
-        stats["oracle_ade"] = oracle_ade
-        stats["regret"] = regret
-        stats["proposal_spread"] = proposal_spread
-
-    if "controls" in token_blob and "scores" in token_blob and "future" in token_blob:
-        controls = token_blob["controls"].float()
-        scores = token_blob["scores"].float()
-        future = token_blob["future"].float()
-
-        n = future.shape[0]
-        horizon = future.shape[1]
-        num_proposals = scores.shape[1]
-
-        ctrl = controls.view(n, num_proposals, horizon, 2)
-        selected_idx = scores.argmin(dim=1)
-        row_idx = torch.arange(n)
-        selected_ctrl = ctrl[row_idx, selected_idx]
-
-        accel = selected_ctrl[..., 0]
-        stats["brake_mag"] = (-accel).clamp_min(0).mean(dim=1)
-        stats["accel_mag"] = accel.clamp_min(0).mean(dim=1)
-
-    if "past" in token_blob:
-        past = token_blob["past"].float()  # (N, 16, 6)
-    
-        vx = past[:, -1, 2]
-        vy = past[:, -1, 3]
-        ax = past[:, -1, 4]
-        ay = past[:, -1, 5]
-        
-        speed = torch.sqrt(vx * vx + vy * vy)
-
-        stats["past_final_speed"] = torch.sqrt(vx * vx + vy * vy)
-        stats["past_final_heading"] = torch.atan2(vy, vx)
-        stats["past_final_accel_mag"] = torch.sqrt(ax * ax + ay * ay)
-    
-        # curvature of past trajectory
-        seg = past[:, 1:, :2] - past[:, :-1, :2]  # (N, 15, 2)
-        seg_norm = torch.norm(seg, dim=-1).clamp_min(1e-6)  # (N, 15)
-        heading = torch.atan2(seg[..., 1], seg[..., 0])  # (N, 15)
+    if future.shape[1] >= 3:
+        seg = future[:, 1:] - future[:, :-1]
+        seg_norm = torch.norm(seg, dim=-1).clamp_min(1e-6)
+        heading = torch.atan2(seg[..., 1], seg[..., 0])
         d_heading = torch.atan2(
             torch.sin(heading[:, 1:] - heading[:, :-1]),
             torch.cos(heading[:, 1:] - heading[:, :-1]),
-        ).abs()  # (N, 14)
-        ds = 0.5 * (seg_norm[:, 1:] + seg_norm[:, :-1])  # (N, 14)
+        ).abs()
+        ds = 0.5 * (seg_norm[:, 1:] + seg_norm[:, :-1])
         curvature = d_heading / ds.clamp_min(1e-6)
-        mean_curvature = curvature.mean(dim=1)
+        stats["future_avg_curvature"] = curvature.mean(dim=1)
 
-        # mask out near-stationary scenes
-        moving_mask = speed > 0.5
-        stats["past_avg_curvature"] = torch.where(moving_mask, mean_curvature, torch.zeros_like(mean_curvature))
+    scores = token_blob["scores"].float()
+    selected_idx = scores.argmin(dim=1)
+    stats["selected_proposal"] = selected_idx.float()
 
-        # stats["past_avg_curvature"] = (d_heading / ds.clamp_min(1e-6)).mean(dim=1)
-    
-        # was the vehicle braking or accelerating over the past window?
-        accel_x = past[:, :, 4]  # (N, 16)
-        stats["past_mean_accel"] = accel_x.mean(dim=1)
-        stats["past_mean_brake"] = (-accel_x).clamp_min(0).mean(dim=1)
+    if scores.shape[1] > 1:
+        sorted_scores = scores.sort(dim=1).values
+        stats["score_margin"] = sorted_scores[:, 1] - sorted_scores[:, 0]
+
+    probs = torch.softmax(-scores, dim=1)
+    stats["score_entropy"] = -(probs * probs.clamp_min(1e-8).log()).sum(dim=1)
+
+    future = token_blob["future"].float()
+    trajectory = token_blob["trajectory"].float()
+    scores = token_blob["scores"].float()
+
+    n = future.shape[0]
+    horizon = future.shape[1]
+    num_proposals = scores.shape[1]
+
+    traj = trajectory.view(n, num_proposals, horizon, 2)
+    dist = torch.norm(traj - future[:, None], dim=-1)
+    ade_per_mode = dist.mean(dim=-1)
+
+    selected_idx = scores.argmin(dim=1)
+    row_idx = torch.arange(n)
+
+    selected_ade = ade_per_mode[row_idx, selected_idx]
+    oracle_ade = ade_per_mode.min(dim=1).values
+    regret = selected_ade - oracle_ade
+
+    traj_mean = traj.mean(dim=1, keepdim=True)
+    proposal_spread = torch.norm(traj - traj_mean, dim=-1).mean(dim=(1, 2))
+
+    stats["selected_ade"] = selected_ade
+    stats["oracle_ade"] = oracle_ade
+    stats["regret"] = regret
+    stats["proposal_spread"] = proposal_spread
+
+    controls = token_blob["controls"].float()
+    scores = token_blob["scores"].float()
+    future = token_blob["future"].float()
+
+    n = future.shape[0]
+    horizon = future.shape[1]
+    num_proposals = scores.shape[1]
+
+    ctrl = controls.view(n, num_proposals, horizon, 2)
+    selected_idx = scores.argmin(dim=1)
+    row_idx = torch.arange(n)
+    selected_ctrl = ctrl[row_idx, selected_idx]
+
+    accel = selected_ctrl[..., 0]
+    stats["brake_mag"] = (-accel).clamp_min(0).mean(dim=1)
+    stats["accel_mag"] = accel.clamp_min(0).mean(dim=1)
+
+    past = token_blob["past"].float()  # (N, 16, 6)
+
+    vx = past[:, -1, 2]
+    vy = past[:, -1, 3]
+    ax = past[:, -1, 4]
+    ay = past[:, -1, 5]
+
+    speed = torch.sqrt(vx * vx + vy * vy)
+
+    stats["past_final_speed"] = torch.sqrt(vx * vx + vy * vy)
+    stats["past_final_heading"] = torch.atan2(vy, vx)
+    stats["past_final_accel_mag"] = torch.sqrt(ax * ax + ay * ay)
+
+    # curvature of past trajectory
+    seg = past[:, 1:, :2] - past[:, :-1, :2]  # (N, 15, 2)
+    seg_norm = torch.norm(seg, dim=-1).clamp_min(1e-6)  # (N, 15)
+    heading = torch.atan2(seg[..., 1], seg[..., 0])  # (N, 15)
+    d_heading = torch.atan2(
+        torch.sin(heading[:, 1:] - heading[:, :-1]),
+        torch.cos(heading[:, 1:] - heading[:, :-1]),
+    ).abs()  # (N, 14)
+    ds = 0.5 * (seg_norm[:, 1:] + seg_norm[:, :-1])  # (N, 14)
+    curvature = d_heading / ds.clamp_min(1e-6)
+    mean_curvature = curvature.mean(dim=1)
+
+    # mask out near-stationary scenes
+    moving_mask = speed > 0.5
+    stats["past_avg_curvature"] = torch.where(moving_mask, mean_curvature, torch.zeros_like(mean_curvature))
+
+    # stats["past_avg_curvature"] = (d_heading / ds.clamp_min(1e-6)).mean(dim=1)
+
+    # was the vehicle braking or accelerating over the past window?
+    accel_x = past[:, :, 4]  # (N, 16)
+    stats["past_mean_accel"] = accel_x.mean(dim=1)
+    stats["past_mean_brake"] = (-accel_x).clamp_min(0).mean(dim=1)
 
     return stats
 
@@ -350,14 +345,13 @@ def summarize_cluster(
         "max_cluster_score": float(cluster_score.max().item()),
     }
 
-    if "intent" in token_blob:
-        intent = token_blob["intent"].long()
-        top_intent = intent[top_idx]
-        for intent_id in sorted(torch.unique(intent).tolist()):
-            name = INTENT_NAMES.get(int(intent_id), str(int(intent_id)))
-            summary[f"top_frac_intent_{name}"] = float(
-                (top_intent == intent_id).float().mean().item()
-            )
+    intent = token_blob["intent"].long()
+    top_intent = intent[top_idx]
+    for intent_id in sorted(torch.unique(intent).tolist()):
+        name = INTENT_NAMES.get(int(intent_id), str(int(intent_id)))
+        summary[f"top_frac_intent_{name}"] = float(
+            (top_intent == intent_id).float().mean().item()
+        )
 
     for stat_name, values in trajectory_stats.items():
         summary[f"top_mean_{stat_name}"] = float(values[top_idx].float().mean().item())
@@ -385,10 +379,9 @@ def summarize_cluster(
             "active_cluster_features": " ".join(active_features),
         }
 
-        if "intent" in token_blob:
-            intent_id = int(token_blob["intent"][scene_idx].item())
-            row["intent_id"] = intent_id
-            row["intent_name"] = INTENT_NAMES.get(intent_id, str(intent_id))
+        intent_id = int(token_blob["intent"][scene_idx].item())
+        row["intent_id"] = intent_id
+        row["intent_name"] = INTENT_NAMES.get(intent_id, str(intent_id))
 
         for stat_name, values in trajectory_stats.items():
             row[stat_name] = float(values[scene_idx].item())
@@ -489,7 +482,6 @@ def main() -> None:
     output_dir = default_analysis_dir(run_root, args.sae_block, args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Loading SAE bundle...")
     bundle = load_sae_bundle(
         run_root,
         args.split,
@@ -503,17 +495,14 @@ def main() -> None:
     print(f"SAE checkpoint path: {bundle['ckpt_path']}")
     print(f"Token path: {bundle['token_path']}")
 
-    print("Resolving token tensor...")
     token_tensor, token_key = resolve_token_tensor(token_blob, args.sae_block)
     print(f"Using token key: {token_key}")
     print(f"Token tensor shape: {tuple(token_tensor.shape)}")
 
-    print("Building SAE...")
     sae = build_sae_from_checkpoint(sae_ckpt)
     sae.to(device)
     sae.eval()
 
-    print("Encoding SAE activations...")
     z_all = encode_tensor_batchwise(
         sae,
         token_tensor,
@@ -523,10 +512,8 @@ def main() -> None:
 
     print(f"SAE activation tensor z_all shape: {tuple(z_all.shape)}")
 
-    print("Computing auxiliary scene/output statistics...")
     trajectory_stats = compute_trajectory_stats(token_blob)
 
-    print("Computing feature correlations...")
     corr, kept_features, active_frac = compute_feature_correlation(
         z_all=z_all,
         min_active_frac=args.min_active_frac,
@@ -541,7 +528,6 @@ def main() -> None:
         for idx, feature in enumerate(kept_features)
     }
 
-    print("Finding correlated feature clusters...")
     clusters = connected_components_from_corr(
         corr=corr,
         kept_features=kept_features,
@@ -555,10 +541,8 @@ def main() -> None:
     pair_csv = output_dir / f"sae_top_correlated_pairs_block_{args.sae_block}_{args.split}_thresh{args.corr_threshold}.csv"
     cluster_csv = output_dir / f"sae_correlation_clusters_block_{args.sae_block}_{args.split}_thresh{args.corr_threshold}.csv"
     top_scene_csv = output_dir / f"sae_cluster_top_scenes_block_{args.sae_block}_{args.split}_thresh{args.corr_threshold}.csv"
-    print("Writing feature frequencies...")
     write_feature_frequency_csv(freq_csv, active_frac)
 
-    print("Writing top correlated feature pairs...")
     write_feature_pair_csv(
         path=pair_csv,
         corr=corr,
@@ -567,7 +551,6 @@ def main() -> None:
         top_k_pairs=args.top_k_pairs,
     )
 
-    print("Summarizing clusters...")
     cluster_rows = []
     top_scene_rows = []
 
@@ -603,21 +586,11 @@ def main() -> None:
         outputs=[freq_csv, pair_csv, cluster_csv, top_scene_csv],
     )
 
-    print("")
-    print("Done.")
     print(f"Saved feature frequencies to: {freq_csv}")
     print(f"Saved top correlated pairs to: {pair_csv}")
     print(f"Saved cluster summaries to: {cluster_csv}")
     print(f"Saved top scenes per cluster to: {top_scene_csv}")
     print(f"Saved run configuration to: {config_json}")
-
-    print("")
-    print("Interpretation step:")
-    print("1. Open the cluster summaries CSV.")
-    print("2. Pick clusters with high mean_pairwise_corr and many features.")
-    print("3. Open the top-scenes CSV for those cluster IDs.")
-    print("4. Visualize those scene_idx values using the repo's existing visualization tools.")
-    print("5. Write a hypothesis for what input/scenario property causes the cluster to activate.")
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ set -euo pipefail
 source "${REPO_ROOT:-$SLURM_SUBMIT_DIR}/paths.env"
 cd "$REPO_ROOT/src"
 "$PYTHON_BIN" train_sae.py \
-  --output_dir "$RUN_ROOT" \
+  --output_dir "$RUN_ROOT/model" \
   --train_dataset "$RUN_ROOT/tokens/planner_tokens_train.pt" \
   --val_dataset "$RUN_ROOT/tokens/planner_tokens_val.pt" \
   --blocks "${BLOCKS:-all}" \

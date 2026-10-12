@@ -13,12 +13,6 @@ if TYPE_CHECKING:
 
 DEFAULT_SAE_BLOCK = 3
 DEFAULT_TOPK_RATIO = 16
-DRVLA_SAE_VERSION = "topk_aux_drvla_v1"
-DRVLA_SOURCE_NOTE = "Dr.VLA SAE recipe aligned to Table 4 / Appendix A.2."
-DRVLA_SOURCE_URLS = (
-    "https://drvla.github.io/",
-    "https://drvla.github.io/drvla.pdf",
-)
 
 
 def planner_token_key(block_idx: int) -> str:
@@ -44,59 +38,13 @@ def parse_blocks(text: str, *, default_blocks: list[int] | None = None) -> list[
 
 def resolve_token_tensor(token_blob: dict, sae_block: int) -> tuple[torch.Tensor, str]:
     block_key = planner_token_key(sae_block)
-    if block_key in token_blob:
-        return token_blob[block_key].float(), block_key
-    if sae_block == DEFAULT_SAE_BLOCK and "planner_query_tok" in token_blob:
-        return token_blob["planner_query_tok"].float(), "planner_query_tok"
-    raise KeyError(
-        f"Could not find block token key for sae_block={sae_block}. "
-        f"Expected {block_key} or planner_query_tok for block {DEFAULT_SAE_BLOCK}."
-    )
-
-
-def infer_sae_model_dir(run_root: Path, sae_block: int) -> Path:
-    block_dir = run_root / "model" / f"block_{sae_block}"
-    if block_dir.exists():
-        return block_dir
-    if sae_block == DEFAULT_SAE_BLOCK:
-        return run_root / "model"
-    return block_dir
+    return token_blob[block_key].float(), block_key
 
 
 def infer_sae_paths(run_root: Path, split: str, sae_block: int) -> tuple[Path, Path]:
-    model_dir = infer_sae_model_dir(run_root, sae_block)
-    ckpt_path = model_dir / "sae_checkpoint.pt"
+    ckpt_path = run_root / "model" / f"block_{sae_block}" / "sae_checkpoint.pt"
     token_path = run_root / "tokens" / f"planner_tokens_{split}.pt"
     return ckpt_path, token_path
-
-
-def normalize_compiled_state_dict(state_dict: dict, module) -> dict:
-    """Reconcile ``torch.compile``'s ``._orig_mod.`` key prefixes with `module`.
-
-    A checkpoint saved from a compiled SAE carries ``encoder._orig_mod.weight``
-    where an eager module expects ``encoder.weight`` (and vice versa). Loading
-    across that boundary silently drops every tensor under ``strict=False``,
-    leaving a randomly initialised SAE that still "loads" successfully.
-    """
-    state_compiled = any("._orig_mod." in key for key in state_dict)
-    module_compiled = any("._orig_mod." in key for key in module.state_dict())
-    if state_compiled == module_compiled:
-        return state_dict
-
-    normalized = {}
-    for key, value in state_dict.items():
-        for prefix in ("encoder.", "decoder."):
-            if module_compiled:
-                if key.startswith(prefix):
-                    key = key.replace(prefix, f"{prefix}_orig_mod.", 1)
-                    break
-            else:
-                compiled_prefix = f"{prefix}_orig_mod."
-                if key.startswith(compiled_prefix):
-                    key = key.replace(compiled_prefix, prefix, 1)
-                    break
-        normalized[key] = value
-    return normalized
 
 
 def build_sae_from_checkpoint(ckpt: dict) -> SparseAutoencoder:
@@ -108,7 +56,7 @@ def build_sae_from_checkpoint(ckpt: dict) -> SparseAutoencoder:
         aux_alpha=ckpt["lambda_aux"],
         dead_steps_threshold=ckpt["dead_steps_threshold"],
     )
-    model.load_state_dict(normalize_compiled_state_dict(ckpt["state_dict"], model), strict=False)
+    model.load_state_dict(ckpt["state_dict"])
     return model
 
 
@@ -191,25 +139,9 @@ def collate_dataset_indices(dataset: WaymoE2E, indices: torch.Tensor) -> dict:
     return collate_with_images(samples)
 
 
-def planner_inputs_from_collated_batch(
-    batch: dict,
-    *,
-    lit_model,
-    device: torch.device,
-) -> dict[str, torch.Tensor]:
-    # `collate_with_images` decodes JPEGs in the dataloader workers and emits "IMAGES";
-    # older collated blobs (and any caller that bypasses the collate fn) still carry the
-    # raw "IMAGES_JPEG" bytes, so handle both. Mirrors LitModel.transfer_batch_to_device.
-    if "IMAGES" in batch:
-        images = [
-            img.to(device, non_blocking=True) if img is not None else None
-            for img in batch["IMAGES"]
-        ]
-    elif "IMAGES_JPEG" in batch:
-        images = lit_model.decode_batch_jpeg(batch["IMAGES_JPEG"], device=device)
-    else:
-        raise KeyError("collated batch has neither 'IMAGES' nor 'IMAGES_JPEG'")
-
+def planner_inputs_from_collated_batch(batch: dict, *, device: torch.device) -> dict[str, torch.Tensor]:
+    """Move a `collate_with_images` batch to `device` in the planner's input format."""
+    images = [img.to(device, non_blocking=True) if img is not None else None for img in batch["IMAGES"]]
     return {
         "PAST": batch["PAST"].to(device, non_blocking=True),
         "IMAGES": images,
@@ -217,14 +149,8 @@ def planner_inputs_from_collated_batch(
     }
 
 
-def prepare_replay_context(
-    planner_model,
-    lit_model,
-    batch: dict,
-    *,
-    device: torch.device,
-) -> dict[str, torch.Tensor]:
-    model_inputs = planner_inputs_from_collated_batch(batch, lit_model=lit_model, device=device)
+def prepare_replay_context(planner_model, batch: dict, *, device: torch.device) -> dict[str, torch.Tensor]:
+    model_inputs = planner_inputs_from_collated_batch(batch, device=device)
     tokens, _ = planner_model.prepare_visual_tokens(model_inputs["IMAGES"])
     return {
         "past": model_inputs["PAST"],

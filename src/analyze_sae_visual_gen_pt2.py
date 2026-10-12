@@ -47,18 +47,6 @@ def write_csv(path: Path, rows: list[dict], fieldnames: list[str] | None = None)
         writer.writerows(rows)
 
 
-def infer_checkpoint_path(run_root: Path, token_blob: dict, explicit_path: str | None) -> str:
-    if explicit_path is not None:
-        return explicit_path
-    meta_path = token_blob.get("meta", {}).get("checkpoint")
-    if meta_path and Path(meta_path).exists():
-        return meta_path
-    repo_default = Path(__file__).resolve().parent / "camera-e2e-epoch=04-val_loss=2.90.ckpt"
-    if repo_default.exists():
-        return str(repo_default)
-    raise FileNotFoundError("Could not infer planner checkpoint path. Pass --planner_checkpoint.")
-
-
 def resolve_edited_path(manifest_path: Path, row: dict) -> Path:
     edited_value = row.get("edited_path")
     if not edited_value:
@@ -281,7 +269,6 @@ def replay_pairs(
     rows: list[dict],
     dataset: WaymoE2E,
     planner_model,
-    lit_model,
     sae,
     sae_block: int,
     token_blob: dict,
@@ -345,7 +332,7 @@ def replay_pairs(
             }
             future = token_blob["future"].index_select(0, token_indices).to(device, non_blocking=True)
             out_edit = planner_model(
-                planner_inputs_from_collated_batch(edit_batch, lit_model=lit_model, device=device),
+                planner_inputs_from_collated_batch(edit_batch, device=device),
                 return_block_tokens=True,
             )
 
@@ -627,13 +614,12 @@ def main() -> None:
     sae.eval()
     token_tensor, token_key = resolve_token_tensor(bundle["token_blob"], args.sae_block)
     token_name_to_idx = build_token_name_lookup(bundle["token_blob"])
-    checkpoint_path = infer_checkpoint_path(run_root, bundle["token_blob"], args.planner_checkpoint)
-    planner_model, lit_model = load_model(checkpoint_path, device=device)
+    checkpoint_path = args.planner_checkpoint or bundle["token_blob"]["meta"]["checkpoint"]
+    planner_model = load_model(checkpoint_path, device=device)
 
     print(f"Loaded {len(rows)} edited manifest rows")
     print(f"Using token key {token_key}")
     print(f"Using planner checkpoint {checkpoint_path}")
-    print("Computing baseline SAE stats")
     baseline_stats = compute_baseline_stats(
         sae=sae,
         token_tensor=token_tensor,
@@ -642,12 +628,10 @@ def main() -> None:
         min_scale=args.min_scale,
     )
 
-    print("Replaying original/edited pairs")
     replay = replay_pairs(
         rows=rows,
         dataset=dataset,
         planner_model=planner_model,
-        lit_model=lit_model,
         sae=sae,
         sae_block=args.sae_block,
         token_blob=bundle["token_blob"],
@@ -667,7 +651,6 @@ def main() -> None:
     write_csv(pair_csv, replay["pair_rows"])
     print(f"Saved pair rows to {pair_csv}")
 
-    print("Saving per-sample feature deltas")
     save_feature_deltas_pt(
         feature_delta_pt,
         rows=rows,
@@ -677,7 +660,6 @@ def main() -> None:
     )
     print(f"Saved feature deltas to {feature_delta_pt}")
 
-    print("Computing feature summaries")
     summary_rows = build_summary_rows(
         rows=rows,
         z_orig=replay["z_orig"],

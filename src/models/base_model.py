@@ -7,27 +7,10 @@ from dataclasses import asdict, is_dataclass
 
 from .losses.depth_loss import DepthLoss
 
-class BaseModel(nn.Module):
-    def __init__(self, in_dim, out_dim):
-        super(BaseModel, self).__init__()
-        
-        # This is literally just linear regression = y_hat = Wx + b
-        self.nn = nn.Sequential(
-            nn.Linear(in_dim, out_dim)
-        )
-        
-    def forward(self, x: dict) -> torch.Tensor:
-        past, images, intent = x['PAST'], x['IMAGES'], x['INTENT']
-        x = past.reshape(past.size(0), -1)  # Flatten to (B, 16 * 6) = (B, 96)
-        return self.nn(x)
-    
 class LitModel(pl.LightningModule):
     def __init__(self, model: nn.Module, lr: float, lr_vision: float | None = None, rfs_weight: float = 0.0):
         super(LitModel, self).__init__()
         self.model = model
-
-        # NVJPEG fall back if we are running on Negishi AMD GPU
-        self.has_nvjpeg = True
 
         # If we are using ScorerModel, which has a cfg, then save the attributes of the cfg as hparams, so they go into wandb
         cfg = getattr(model, "cfg", None)
@@ -68,15 +51,6 @@ class LitModel(pl.LightningModule):
         if not isinstance(batch, dict):
             return super().transfer_batch_to_device(batch, device, dataloader_idx)
 
-        # don't move images_jpeg to gpu, move the decoded images to gpu
-        if "IMAGES_JPEG" in batch:
-            images_jpeg = batch["IMAGES_JPEG"]
-            batch_wo_jpeg = dict(batch)
-            batch_wo_jpeg.pop("IMAGES_JPEG", None)
-            moved = super().transfer_batch_to_device(batch_wo_jpeg, device, dataloader_idx)
-            moved["IMAGES"] = self.decode_batch_jpeg(images_jpeg, device=device)
-            return moved
-
         if "IMAGES" in batch:
             images = batch["IMAGES"]
             rest = {k: v for k, v in batch.items() if k != "IMAGES"}
@@ -89,53 +63,6 @@ class LitModel(pl.LightningModule):
 
         return super().transfer_batch_to_device(batch, device, dataloader_idx)
 
-
-    def decode_batch_jpeg(
-        self,
-        images_jpeg: list[list[torch.Tensor]],
-        device: torch.device | None = None,
-    ) -> list[torch.Tensor | None]:
-        cam_idxs_used = tuple(getattr(self.model.cfg, "cam_idxs_used", range(len(images_jpeg))))
-        decode_device = self.device if device is None else device
-
-        selected = [(cam_idx, images_jpeg[cam_idx]) for cam_idx in cam_idxs_used]
-
-        # Flatten cameras
-        flat_encoded, cam_sizes = [], []
-        for cam_idx, cam in selected:
-            cam_sizes.append((cam_idx, len(cam)))
-            for jpg in cam:
-                t = jpg if isinstance(jpg, torch.Tensor) else torch.frombuffer(memoryview(jpg), dtype=torch.uint8)
-                # decode_jpeg requires the raw jpeg bytes to be on cpu
-                if t.device.type != "cpu":
-                    t = t.cpu()
-                flat_encoded.append(t)
-        
-        try:
-            flat_decoded = torchvision.io.decode_jpeg(
-                flat_encoded, 
-                mode=torchvision.io.ImageReadMode.UNCHANGED,
-                device=decode_device,
-            ) # list of (C, H, W) gpu tensors
-        except Exception as e:
-            if "nvJPEG" not in str(e):
-                raise e
-            self.has_nvjpeg = False
-            flat_decoded = torchvision.io.decode_jpeg(
-                flat_encoded,
-                mode=torchvision.io.ImageReadMode.UNCHANGED,
-                device="cpu",
-            )
-            if torch.device(decode_device).type == "cuda":
-                flat_decoded = [img.to(decode_device, non_blocking=True) for img in flat_decoded]
-
-        out = [None] * len(images_jpeg)
-        idx = 0
-        for cam_idx, n in cam_sizes:
-            out[cam_idx] = torch.stack(flat_decoded[idx:idx+n], dim=0)
-            idx += n
-
-        return out
 
     def on_fit_start(self) -> None:
         super().on_fit_start()
@@ -246,13 +173,7 @@ class LitModel(pl.LightningModule):
     def _shared_step(self, batch: torch.Tensor, stage: str) -> torch.Tensor:
         past, future, intent = batch['PAST'], batch['FUTURE'], batch['INTENT']
 
-        if "IMAGES" in batch:
-            images = batch["IMAGES"]
-        elif "IMAGES_JPEG" in batch:
-            images_jpeg = batch["IMAGES_JPEG"]
-            images = self.decode_batch_jpeg(images_jpeg)
-        else:
-            raise KeyError("Batch must contain either 'IMAGES_JPEG' or 'IMAGES' key.")
+        images = batch["IMAGES"]
         
         # `past` is our input (B, 16, 6) e.g. Batch x Time x (x, y, v_x, v_y, a_x, a_y)
         # and `future` is our output (B, 20, 2) e.g. Batch x Time x (x, y)

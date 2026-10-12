@@ -4,11 +4,8 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-from models.sae import SparseAutoencoder, TOPK_AUX_SAE_TYPE
+from models.sae import SparseAutoencoder
 from sae_utils import (
-    DRVLA_SAE_VERSION,
-    DRVLA_SOURCE_NOTE,
-    DRVLA_SOURCE_URLS,
     parse_blocks,
     resolve_token_tensor,
     resolve_topk,
@@ -90,11 +87,7 @@ def train_one_block(
     geometric_median_samples: int,
     grad_clip: float,
     seed: int,
-    train_dataset_path: str,
-    val_dataset_path: str,
     token_key: str,
-    train_blob_meta: dict,
-    val_blob_meta: dict,
 ) -> None:
     torch.manual_seed(seed + block_idx)
 
@@ -190,16 +183,16 @@ def train_one_block(
             best_state = {key: value.detach().cpu() for key, value in model.state_dict().items()}
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = output_dir / "sae_checkpoint.pt"
+    ckpt_path.unlink(missing_ok=True)  # replace, never write through, a link to the shipped sae_checkpoints/
     torch.save(
         {
             "state_dict": best_state,
             "best_score": best_score,
             "input_dim": train_tensor.shape[1],
             "latent_dim": train_tensor.shape[1],
-            "sae_type": TOPK_AUX_SAE_TYPE,
             "block_index": block_idx,
             "token_key": token_key,
-            "expansion_ratio": 1.0,
             "k": k,
             "k_aux": k_aux,
             "lambda_aux": lambda_aux,
@@ -211,38 +204,10 @@ def train_one_block(
             "geometric_median_samples": geometric_median_samples,
             "grad_clip": grad_clip,
             "seed": seed,
-            "train_tokens_path": str(Path(train_dataset_path).resolve()),
-            "val_tokens_path": str(Path(val_dataset_path).resolve()),
             "cmse": cmse,
             "history": history,
-            "metadata": {
-                "sae_version": DRVLA_SAE_VERSION,
-                "source_note": DRVLA_SOURCE_NOTE,
-                "source_urls": list(DRVLA_SOURCE_URLS),
-                "activation_kind": "post_transformer_block_query",
-                "activation_key": token_key,
-                "block_index": block_idx,
-                "resolved_hyperparameters": {
-                    "input_dim": train_tensor.shape[1],
-                    "latent_dim": train_tensor.shape[1],
-                    "expansion_ratio": 1.0,
-                    "k": k,
-                    "k_aux": k_aux,
-                    "lambda_aux": lambda_aux,
-                    "lr": lr,
-                    "beta1": beta1,
-                    "beta2": beta2,
-                    "batch_size": batch_size,
-                    "max_epochs": max_epochs,
-                    "dead_steps_threshold": dead_steps_threshold,
-                    "geometric_median_samples": geometric_median_samples,
-                    "grad_clip": grad_clip,
-                },
-                "train_token_meta": train_blob_meta,
-                "val_token_meta": val_blob_meta,
-            },
         },
-        output_dir / "sae_checkpoint.pt",
+        ckpt_path,
     )
 
 
@@ -316,11 +281,7 @@ def main(argv: list[str] | None = None) -> None:
             geometric_median_samples=args.geometric_median_samples,
             grad_clip=args.grad_clip,
             seed=args.seed,
-            train_dataset_path=args.train_dataset,
-            val_dataset_path=args.val_dataset,
             token_key=token_key,
-            train_blob_meta=dict(train_blob.get("meta", {})),
-            val_blob_meta=dict(val_blob.get("meta", {})),
         )
 
 

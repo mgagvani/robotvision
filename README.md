@@ -13,7 +13,6 @@ src/                    all Python; run every command from this directory (or vi
   models/               SMTS (monocular.py), LitModel trainer, SAE
   train.py              planner training            train_sae.py            SAE training
   extract_planner_tok.py  planner-query tokens      analyze_sae_*.py        SAE analyses
-  visualizations/paper/   figure scripts
   index_{train,val}.pkl   TFRecord index (rebuild with build_index.py for a new dataset version)
 sae_checkpoints/        the paper's block-0..3 SAEs (sae_block_{n}.pt)
 scripts/                one Slurm job per pipeline stage; all read paths.env
@@ -59,5 +58,3 @@ environment variables (see the header of each file).
 | 5 | Latent steering and controllability (Sec. 4.5, App. D) | `sbatch scripts/run_sae_control.slurm` | `$RUN_ROOT/analysis/block_3/sae_control_*.csv` |
 | 6 | Counterfactual edits, stage 1 (Sec. 4.4, App. C) | `sbatch scripts/run_visual_gen.slurm` | `$VISUAL_GEN_ROOT/manifest.jsonl` + images |
 | 7 | Counterfactual edits, stage 2 | `sbatch scripts/run_visual_gen_pt2.slurm` | `$VISUAL_GEN_ROOT/sae_analysis/` |
-| 8 | Fig. 3, gallery, supplement edit panels | `sbatch scripts/run_figures_counterfactual.slurm` | `$OUTPUT_ROOT/figures/` |
-| 9 | Fig. 5b edit-to-steering alignment | `sbatch scripts/run_edit_to_steering_alignment.slurm` (needs 5 and 7) | `$RUN_ROOT/analysis/block_3/edit_sensitivity/` |

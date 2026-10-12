@@ -12,8 +12,6 @@ dependencies = [
     "timm>=1.0",
     "transformers>=4.45",
     "numpy",
-    "pandas",
-    "matplotlib",
     "pillow",
     "protobuf",
     "tqdm",

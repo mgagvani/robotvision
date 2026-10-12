@@ -217,7 +217,6 @@ def generate_local(scene_description: str, image: Image.Image | None = None):
 
 def load_qwen_image_edit():
     pipeline = QwenImageEditPipeline.from_pretrained("Qwen/Qwen-Image-Edit")
-    print("pipeline loaded")
     pipeline.to(torch.bfloat16)
     pipeline.to("cuda")
     pipeline.set_progress_bar_config(disable=None)
